@@ -36,6 +36,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
+
+                NavigationLink("Local Server") {
+                    LocalServerView()
+                }
+                .buttonStyle(.bordered)
                 
                 Divider()
                 

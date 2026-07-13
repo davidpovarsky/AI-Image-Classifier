@@ -58,39 +58,72 @@
 //}
 
 import CoreML
-import Vision
 import UIKit
+import Vision
 
-final class CoreMLService {
-    
-    private let model: VNCoreMLModel
-    
-    init() {
+actor CoreMLService {
+    static let shared = CoreMLService()
+
+    enum ServiceError: Error {
+        case invalidImage
+        case modelUnavailable
+        case classificationFailed
+    }
+
+    private let model: Result<VNCoreMLModel, Error>
+
+    private init() {
         do {
             let config = MLModelConfiguration()
+            config.computeUnits = .all
             let coreMLModel = try MobileNetV2(configuration: config).model
-            self.model = try VNCoreMLModel(for: coreMLModel)
+            model = .success(try VNCoreMLModel(for: coreMLModel))
         } catch {
-            fatalError("Model load failed: \(error)")
+            model = .failure(error)
         }
     }
-    
-    func classify(image: UIImage, completion: @escaping ([VNClassificationObservation]) -> Void) {
-        
+
+    func classify(imageData: Data) throws -> [ClassificationPrediction] {
+        guard let image = UIImage(data: imageData) else {
+            throw ServiceError.invalidImage
+        }
+        return try classify(image: image)
+    }
+
+    func classify(image: UIImage) throws -> [ClassificationPrediction] {
         guard let ciImage = CIImage(image: image) else {
-            completion([])
-            return
+            throw ServiceError.invalidImage
         }
-        
-        let request = VNCoreMLRequest(model: model) { request, _ in
-            let results = request.results as? [VNClassificationObservation] ?? []
-            completion(results.prefix(3).map { $0 })
+
+        let visionModel: VNCoreMLModel
+        do {
+            visionModel = try model.get()
+        } catch {
+            throw ServiceError.modelUnavailable
         }
-        
-        let handler = VNImageRequestHandler(ciImage: ciImage)
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            try? handler.perform([request])
+
+        let request = VNCoreMLRequest(model: visionModel)
+        request.imageCropAndScaleOption = .centerCrop
+
+        do {
+            try VNImageRequestHandler(ciImage: ciImage).perform([request])
+        } catch {
+            throw ServiceError.classificationFailed
         }
+
+        guard let observations = request.results as? [VNClassificationObservation] else {
+            throw ServiceError.classificationFailed
+        }
+
+        return observations
+            .map {
+                ClassificationPrediction(
+                    label: $0.identifier,
+                    confidence: Double($0.confidence)
+                )
+            }
+            .sorted { $0.confidence > $1.confidence }
+            .prefix(3)
+            .map { $0 }
     }
 }

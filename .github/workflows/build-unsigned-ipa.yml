@@ -1,0 +1,148 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feature/local-coreml-http-server
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Detect project and scheme
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+
+          workspaces=()
+          while IFS= read -r path; do
+            workspaces+=("$path")
+          done < <(find . -maxdepth 2 -type d -name '*.xcworkspace' -not -path './*.xcodeproj/*' | sort)
+
+          projects=()
+          while IFS= read -r path; do
+            projects+=("$path")
+          done < <(find . -maxdepth 2 -type d -name '*.xcodeproj' | sort)
+
+          if (( ${#workspaces[@]} == 1 )); then
+            container_flag='-workspace'
+            container_path="${workspaces[0]#./}"
+          elif (( ${#workspaces[@]} == 0 && ${#projects[@]} == 1 )); then
+            container_flag='-project'
+            container_path="${projects[0]#./}"
+          else
+            echo "Expected exactly one workspace, or exactly one project when no workspace exists." >&2
+            printf 'Workspaces: %s\n' "${workspaces[*]:-none}" >&2
+            printf 'Projects: %s\n' "${projects[*]:-none}" >&2
+            exit 1
+          fi
+
+          xcodebuild "$container_flag" "$container_path" -list -json > build/xcodebuild-list.json
+          scheme=$(ruby -rjson -e '
+            data = JSON.parse(File.read(ARGV[0]))
+            container = data["workspace"] || data["project"]
+            schemes = container && container["schemes"]
+            abort "No shared schemes found" unless schemes&.length == 1
+            puts schemes.first
+          ' build/xcodebuild-list.json)
+
+          {
+            echo "CONTAINER_FLAG=$container_flag"
+            echo "CONTAINER_PATH=$container_path"
+            echo "SCHEME=$scheme"
+          } >> "$GITHUB_ENV"
+
+          echo "Container: $container_flag $container_path"
+          echo "Scheme: $scheme"
+
+      - name: Resolve Swift package dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            "$CONTAINER_FLAG" "$CONTAINER_PATH" \
+            -scheme "$SCHEME" \
+            -resolvePackageDependencies
+
+      - name: Build for generic iOS device
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            "$CONTAINER_FLAG" "$CONTAINER_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            build 2>&1 | tee build/xcodebuild.log
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          products="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
+          apps=()
+          while IFS= read -r path; do
+            apps+=("$path")
+          done < <(find "$products" -maxdepth 1 -type d -name '*.app' | sort)
+
+          if (( ${#apps[@]} != 1 )); then
+            echo "Expected exactly one application product; found ${#apps[@]}." >&2
+            printf '%s\n' "${apps[@]:-}" >&2
+            exit 1
+          fi
+
+          rm -rf build/ipa
+          mkdir -p build/ipa/Payload
+          cp -R "${apps[0]}" build/ipa/Payload/
+          (
+            cd build/ipa
+            zip -r ../AI-Image-Classifier-unsigned.ipa Payload
+          )
+
+          test -f build/AI-Image-Classifier-unsigned.ipa
+          ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa)
+          echo "IPA_SIZE_BYTES=$ipa_size"
+          unzip -l build/AI-Image-Classifier-unsigned.ipa | tee build/ipa-contents.txt
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Image-Classifier-unsigned-ipa
+          path: build/AI-Image-Classifier-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload xcodebuild log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 14
