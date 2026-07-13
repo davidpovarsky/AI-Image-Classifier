@@ -104,6 +104,46 @@ final class NudeNetTests: XCTestCase {
         XCTAssertEqual(ready.serverVersion, 2)
     }
 
+    func testLiveServerHealthAndSafeJPEGClassification() async throws {
+        let configuration = LocalServerConfiguration(
+            port: 8765,
+            maximumImageBytes: 10 * 1024 * 1024,
+            bearerToken: "unit-test-token"
+        )
+        let server = LocalInferenceServer(configuration: configuration)
+        server.start()
+        defer { server.stop() }
+
+        var healthData: Data?
+        for _ in 0..<60 {
+            if let (data, response) = try? await URLSession.shared.data(from: server.localURL.appending(path: "health")),
+               (response as? HTTPURLResponse)?.statusCode == 200 {
+                healthData = data
+                break
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        let health = try JSONDecoder().decode(HealthResponseDTO.self, from: XCTUnwrap(healthData))
+        XCTAssertEqual(health.model, "NudeNet320n")
+        XCTAssertTrue(health.modelLoaded)
+
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32))
+        let image = renderer.image { context in
+            UIColor.systemBlue.setFill()
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        var request = URLRequest(url: server.localURL.appending(path: "v1/classify"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer unit-test-token", forHTTPHeaderField: "Authorization")
+        request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try XCTUnwrap(image.jpegData(compressionQuality: 0.8))
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let classification = try JSONDecoder().decode(ClassificationResponseDTO.self, from: data)
+        XCTAssertTrue(classification.success)
+        XCTAssertEqual(classification.model, "NudeNet320n")
+    }
+
     private func detection(_ label: String, _ confidence: Double) -> NudeDetection {
         NudeDetection(
             classId: NudeNetLabels.classId(for: label)!,
