@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated struct ClassificationResponseDTO: Codable, Equatable, Sendable {
+nonisolated struct ClassificationResponseDTO: Codable, Sendable {
     let success: Bool
     let allowed: Bool
     let risk: String

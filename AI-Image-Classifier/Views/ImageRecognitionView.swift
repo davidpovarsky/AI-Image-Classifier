@@ -12,7 +12,7 @@ import SwiftUI
 
 struct ImageRecognitionView: View {
     
-    @StateObject private var viewModel = ImageRecognitionViewModel()
+    @State private var viewModel = ImageRecognitionViewModel()
     @State private var selectedImage: UIImage?
     @State private var isImagePickerPresented = false
     

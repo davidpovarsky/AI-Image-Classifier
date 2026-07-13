@@ -8,6 +8,13 @@ model executions or per-request model loading.
 Images remain in memory and are never persisted, uploaded, or logged. Responses
 set `Cache-Control: no-store`. The limit is 10 MiB.
 
+The previous v1 contract used MobileNetV2 classification, returned only the
+three highest ImageNet `{label, confidence}` predictions, used HTTP 422 for
+undecodable bytes, and reported `{status, model, serverVersion}` from health.
+Version 2 preserves the endpoint paths, bearer token, raw-body transport, size
+limit, media types, and a deprecated `predictions` field while adding detector
+boxes and the policy decision. Invalid image bytes now use HTTP 400.
+
 ## Authentication
 
 The first server use generates a UUID bearer token and stores it in

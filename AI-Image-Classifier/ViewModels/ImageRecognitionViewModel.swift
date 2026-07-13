@@ -1,12 +1,14 @@
 import Foundation
+import Observation
 import UIKit
 
 @MainActor
-final class ImageRecognitionViewModel: ObservableObject {
-    @Published var detections: [NudeDetection] = []
-    @Published var decision: NudityPolicyDecision?
-    @Published var errorMessage: String?
-    @Published var isLoading = false
+@Observable
+final class ImageRecognitionViewModel {
+    var detections: [NudeDetection] = []
+    var decision: NudityPolicyDecision?
+    var errorMessage: String?
+    var isLoading = false
 
     private let policy = NudityFilterPolicy()
 

@@ -142,10 +142,10 @@ actor NudeNetService {
                 label: label.identifier,
                 confidence: Double(label.confidence),
                 boundingBox: NormalizedBoundingBox(
-                    x: box.origin.x,
-                    y: box.origin.y,
-                    width: box.width,
-                    height: box.height
+                    x: Double(box.origin.x),
+                    y: Double(box.origin.y),
+                    width: Double(box.width),
+                    height: Double(box.height)
                 )
             )
         }.sorted { $0.confidence > $1.confidence }

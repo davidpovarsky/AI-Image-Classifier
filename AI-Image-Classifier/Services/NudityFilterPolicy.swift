@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 nonisolated struct NudityFilterThresholds: Codable, Equatable, Sendable {
     var femaleBreastExposed: Double = 0.45
@@ -30,6 +31,11 @@ nonisolated struct NudityFilterPolicy: Sendable {
     var thresholds = NudityFilterThresholds()
     var mode: NudityFilterMode = .standard
 
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "AI-Image-Classifier",
+        category: "policy"
+    )
+
     var profileName: String { mode.rawValue }
 
     func evaluate(_ detections: [NudeDetection]) -> NudityPolicyDecision {
@@ -40,13 +46,17 @@ nonisolated struct NudityFilterPolicy: Sendable {
             }
             .max { $0.confidence < $1.confidence }
 
-        return NudityPolicyDecision(
+        let decision = NudityPolicyDecision(
             allowed: triggering == nil,
             risk: triggering == nil ? "none" : "nudity",
             confidence: triggering?.confidence ?? 0,
             triggeredClass: triggering?.label,
             detections: detections
         )
+        if let triggeredClass = decision.triggeredClass {
+            Self.logger.debug("Policy blocked on \(triggeredClass, privacy: .public)")
+        }
+        return decision
     }
 
     private func threshold(for label: String) -> Double? {
