@@ -33,7 +33,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build
-          destinations="$(xcodebuild -project AI-Image-Classifier.xcodeproj -scheme AI-Image-Classifier -showdestinations)"
+          destinations="$(xcodebuild -project AI-Image-Classifier.xcodeproj -scheme AI-Image-Classifier -showdestinations 2>&1)"
           device_id="$(ruby -e '
             match = STDIN.read.lines.find { |line| line.include?("platform:iOS Simulator") && line.include?("name:iPhone") }
             abort "No eligible iPhone simulator destination" unless match
