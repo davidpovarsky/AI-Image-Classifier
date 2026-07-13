@@ -33,12 +33,12 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build
-          device_id="$(xcrun simctl list devices available -j | ruby -rjson -e '
-            data = JSON.parse(STDIN.read)
-            device = data["devices"].values.flatten.find { |item| item["name"].start_with?("iPhone") }
-            abort "No available iPhone simulator" unless device
-            puts device["udid"]
-          ')"
+          destinations="$(xcodebuild -project AI-Image-Classifier.xcodeproj -scheme AI-Image-Classifier -showdestinations)"
+          device_id="$(ruby -e '
+            match = STDIN.read.lines.find { |line| line.include?("platform:iOS Simulator") && line.include?("name:iPhone") }
+            abort "No eligible iPhone simulator destination" unless match
+            puts match.fetch(/id:([^,} ]+)/, 1)
+          ' <<< "$destinations")"
           xcodebuild \
             -project AI-Image-Classifier.xcodeproj \
             -scheme AI-Image-Classifier \
