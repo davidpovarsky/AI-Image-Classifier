@@ -1,66 +1,81 @@
-# Local Core ML HTTP Server
+# Local NudeNet HTTP server
 
-The app can run a loopback-only HTTP server at `http://127.0.0.1:8765`. Classification is performed locally by the existing MobileNetV2 Core ML service. Images are held in memory only: the server does not save them, log their bytes, or upload them.
+The app listens only on `http://127.0.0.1:8765`. NudeNet 320n is loaded once
+with Core ML compute units set to `all`, warmed once, and retained. The actor
+serializes inference so HTTP parsing can remain concurrent without parallel
+model executions or per-request model loading.
+
+Images remain in memory and are never persisted, uploaded, or logged. Responses
+set `Cache-Control: no-store`. The limit is 10 MiB.
 
 ## Authentication
 
-The app creates a random UUID token on first use and stores it in `UserDefaults`. The token remains stable between launches and is shown on the **Local Server** screen. Send it as:
+The first server use generates a UUID bearer token and stores it in
+`UserDefaults`; it remains stable across launches. Copy it from **Local Server**
+and send `Authorization: Bearer <token>`. Tokens and image data are never logged.
 
-```http
-Authorization: Bearer <token>
-```
+## `GET /health`
 
-## API
-
-### `GET /health`
-
-Returns HTTP 200 and JSON:
+Ready response (HTTP 200):
 
 ```json
 {
   "status": "ok",
-  "model": "MobileNetV2",
-  "serverVersion": 1
+  "serverVersion": 2,
+  "model": "NudeNet320n",
+  "modelLoaded": true,
+  "inputSize": 320,
+  "computeUnits": "all",
+  "policyVersion": 1,
+  "error": null
 }
 ```
 
-### `POST /v1/classify`
+Loading, warm-up, or a sanitized model failure returns HTTP 503 with
+`status: "unavailable"` and `modelLoaded: false`. Classification is not accepted
+until readiness is true.
 
-Send the encoded image bytes directly as the request body. Multipart forms and Base64 are not supported.
+## `POST /v1/classify`
 
-Supported media types are `image/jpeg`, `image/png`, `image/webp`, `image/heic`, and `image/heif`. The maximum body size is 10 MiB (`10 * 1024 * 1024` bytes). A successful response contains up to three predictions sorted by descending confidence:
+Send raw JPEG, PNG, WebP, HEIC, or HEIF bytes with the matching `Content-Type`.
+JPEG and PNG decoding is validated before inference. HTTP 200 means inference
+succeeded, regardless of `allowed`. The response includes `allowed`, `risk`,
+maximum blocking `confidence`, `triggeredClass`, `durationMs`, `model`, all
+sorted detections, and normalized Vision-coordinate boxes. The `predictions`
+array mirrors detection labels/confidences temporarily and is deprecated.
 
-```json
-{
-  "success": true,
-  "predictions": [
-    {
-      "label": "example",
-      "confidence": 0.94
-    }
-  ],
-  "durationMs": 35
-}
-```
+Errors:
 
-Errors use a stable JSON body and the matching status code:
+- 400 `invalid_image`
+- 401 `unauthorized`
+- 413 `payload_too_large`
+- 415 `unsupported_media_type`
+- 503 `model_unavailable`
+- 500 `classification_failed`
 
-- 401: `unauthorized`
-- 413: `payload_too_large`
-- 415: `unsupported_media_type`
-- 422: `invalid_image`
-- 500: `classification_failed`
+Run `TOKEN='<copied token>' scripts/test-local-server.sh` in a macOS shell while
+the app is active to generate harmless solid-color JPEG/PNG fixtures and check
+health, auth, decoding, malformed input, and response schema.
 
-## iOS lifecycle limitation
+## Lifecycle and manual validation
 
-iOS may suspend an ordinary app after it moves to the background. A listening socket therefore cannot be guaranteed while the app is suspended. Keep the app active while another local automation client uses it; on iPad, Split View is a practical option. Returning to the active scene asks the server to start again.
+iOS can suspend an ordinary foreground app. No unsupported background mode was
+added and the server cannot promise indefinite background execution. Keep the
+app active (Split View is useful on iPad). The retained model is not
+intentionally unloaded or repeatedly warmed during scene changes.
 
-## Future use from Scripting
+For real-material accuracy validation, use private, lawfully obtained NSFW
+fixtures on the target physical iPad. Do not add those files to this repository,
+logs, screenshots, or CI artifacts. Record only aggregate latency and memory
+measurements in the README benchmark table.
 
-A future Scripting workflow can read an image file as raw data, set the appropriate `Content-Type` and bearer token headers, and POST those bytes to `http://127.0.0.1:8765/v1/classify`. The client should not encode the image as Base64 or multipart data.
+## Scripting and unsigned IPA
 
-## Unsigned IPA from GitHub Actions
+A future on-device Scripting workflow can POST raw file bytes with the bearer
+token and inspect `allowed` and `detections`. It must not use Base64 or multipart.
 
-The **Build unsigned IPA** workflow compiles the Release scheme for a generic physical iOS device with code signing disabled. It packages the resulting `.app` as `AI-Image-Classifier-unsigned.ipa`. This IPA is not signed for installation or App Store distribution; no certificate, provisioning profile, or Apple Developer signing secret is used.
-
-To download it, open the repository's **Actions** tab, select the successful **Build unsigned IPA** run, and download the `AI-Image-Classifier-unsigned-ipa` artifact from the run summary. The artifact contains `AI-Image-Classifier-unsigned.ipa`.
+The **Build unsigned IPA** Action builds `generic/platform=iOS` with signing
+disabled and uploads artifact `AI-Image-Classifier-unsigned-ipa`, containing
+`AI-Image-Classifier-unsigned.ipa`. Open the successful Actions run, scroll to
+**Artifacts**, and download it. It contains an unsigned `.app`; it is not an
+App Store export and has no certificate or provisioning profile.

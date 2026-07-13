@@ -3,4 +3,4 @@ coremltools==9.0
 torch==2.13.0
 torchvision==0.28.0
 pillow==12.3.0
-numpy==2.4.6
+numpy==2.3.5

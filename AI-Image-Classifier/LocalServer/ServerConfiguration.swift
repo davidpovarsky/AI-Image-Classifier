@@ -2,8 +2,8 @@ import Foundation
 
 nonisolated struct LocalServerConfiguration: Sendable {
     static let host = "127.0.0.1"
-    static let modelName = "MobileNetV2"
-    static let serverVersion = 1
+    static let modelName = "NudeNet320n"
+    static let serverVersion = 2
 
     let port: UInt16
     let maximumImageBytes: Int

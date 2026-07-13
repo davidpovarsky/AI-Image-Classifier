@@ -1,207 +1,122 @@
-# 🚀 AI Image Classifier iOS App
+# AI Image Classifier for iOS
 
-## 📱 Overview
+This SwiftUI app performs on-device nudity object detection with NudeNet 320n,
+an Ultralytics YOLOv8n detector exported as a 320×320 Float16 Core ML ML
+Program. It returns labeled detections, confidence scores, normalized bounding
+boxes, and a configurable allow/block policy. Speech and camera demonstrations
+from the upstream project remain available.
 
-AI Image Classifier is a modern iOS application built using **SwiftUI, CoreML, and Vision Framework**.
+Inference is local. Images submitted through the UI or loopback HTTP server are
+held in memory only: the app does not persist, upload, or log image bytes.
 
-The app demonstrates **on-device AI capabilities**, allowing users to:
+## Model provenance and conversion
 
-* Classify images using a pre-trained ML model
-* Convert speech to text using voice input
-* Explore real-time camera-based scanning (device only)
+- Source: [official NudeNet `320n.pt`](https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/320n.pt)
+- Weight release: `v3.4-weights`
+- SHA-256: `1d25e219d536dcd6994651020d3c7cba642d13990e6eef934ed7a8ba650fb582`
+- App artifact: `AI-Image-Classifier/Models/NudeNet320n.mlpackage`
+- Conversion command: `python tools/model_conversion/convert_nudenet_320n.py`
+- Verification command: `python tools/model_conversion/verify_model.py`
 
----
+The reproducible macOS/Python 3.11 workflow is documented in
+`tools/model_conversion/README.md`. Tested pins are Ultralytics 8.4.95,
+coremltools 9.0, PyTorch 2.13.0, torchvision 0.28.0, Pillow 12.3.0, and NumPy
+2.3.5. These are conversion-only tools and are not iOS runtime dependencies.
 
-## ✨ Features
+### Canonical labels
 
-### 🖼️ Image Classification
+| ID | Label | ID | Label |
+|---:|---|---:|---|
+| 0 | FEMALE_GENITALIA_COVERED | 9 | FEET_COVERED |
+| 1 | FACE_FEMALE | 10 | ARMPITS_COVERED |
+| 2 | BUTTOCKS_EXPOSED | 11 | ARMPITS_EXPOSED |
+| 3 | FEMALE_BREAST_EXPOSED | 12 | FACE_MALE |
+| 4 | FEMALE_GENITALIA_EXPOSED | 13 | BELLY_EXPOSED |
+| 5 | MALE_BREAST_EXPOSED | 14 | MALE_GENITALIA_EXPOSED |
+| 6 | ANUS_EXPOSED | 15 | ANUS_COVERED |
+| 7 | FEET_EXPOSED | 16 | FEMALE_BREAST_COVERED |
+| 8 | BELLY_COVERED | 17 | BUTTOCKS_COVERED |
 
-* Select image from photo library
-* Classify using **MobileNetV2 CoreML model**
-* Displays **Top 3 predictions with confidence scores**
-* Clean and user-friendly UI with progress indicators
+## Default policy
 
----
+The standard profile blocks exposed female breast (0.45), female genitalia
+(0.35), male genitalia (0.35), anus (0.35), and buttocks (0.50). Strict mode
+can additionally block exposed male breast (0.75), belly (0.90), and armpits
+(0.95). Faces, covered classes, and feet never block on their own. Policy lives
+separately from inference in `NudityFilterPolicy.swift`, so thresholds can be
+changed without retraining the model.
 
-### 🎤 Voice Assistant
+## Local HTTP API
 
-* Real-time **speech-to-text conversion**
-* Start / Stop listening toggle
-* Built using **Apple Speech Framework + AVAudioEngine**
-* Demonstrates live audio streaming and recognition
+The app exposes a bearer-token-protected server on `127.0.0.1:8765`. Send raw
+encoded image bytes, never multipart or Base64:
 
----
-
-### 📷 Live Camera Scanner
-
-* Real-time camera preview using AVFoundation
-* Ready for future **real-time ML integration**
-* Works only on **physical device** (not simulator)
-
----
-
-## 🏗️ Architecture
-
-This project follows **MVVM (Model-View-ViewModel)** architecture for clean separation of concerns.
-
-### 🔹 Layers
-
-#### 1. View (UI Layer)
-
-* Built using SwiftUI
-* Handles user interaction and rendering
-
-**Examples:**
-
-* `ContentView`
-* `ImageRecognitionView`
-* `VoiceView`
-* `CameraView`
-
----
-
-#### 2. ViewModel (Business Logic)
-
-* Manages app state using `@Published`
-* Handles interaction between View and Services
-
-**Examples:**
-
-* `ImageRecognitionViewModel`
-* `VoiceViewModel`
-* `CameraViewModel`
-
----
-
-#### 3. Services (Core Logic)
-
-* Encapsulates external frameworks and logic
-
-**Examples:**
-
-* `CoreMLService` → Image classification
-* `SpeechService` → Speech recognition
-* `CameraService` → Camera handling
-
----
-
-#### 4. Model (Data Layer)
-
-* Represents structured data
-
-**Example:**
-
-* `PredictionResult`
-
----
-
-## 🧠 Tech Stack
-
-* **SwiftUI**
-* **CoreML (MobileNetV2)**
-* **Vision Framework**
-* **AVFoundation**
-* **Speech Framework**
-* **Combine**
-
----
-
-## ⚙️ How It Works
-
-### 🔍 Image Classification Flow
-
-```
-User selects image
-→ View triggers ViewModel
-→ ViewModel calls CoreMLService
-→ Vision processes image
-→ CoreML model predicts labels
-→ Results displayed in UI
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: image/jpeg' \
+  --data-binary @safe.jpg \
+  http://127.0.0.1:8765/v1/classify
 ```
 
----
-
-### 🎤 Voice Recognition Flow
-
-```
-User taps Start Listening
-→ AVAudioEngine captures audio
-→ SpeechService processes audio buffers
-→ SFSpeechRecognizer converts speech to text
-→ UI updates in real-time
-```
-
----
-
-## 🔐 Permissions Required
-
-Add the following keys in `Info.plist`:
-
-* `NSCameraUsageDescription`
-* `NSPhotoLibraryUsageDescription`
-* `NSMicrophoneUsageDescription`
-* `NSSpeechRecognitionUsageDescription`
-
----
-
-## 📦 Installation & Setup
-
-1. Clone the repository:
-
-```
-git clone https://github.com/goutamroy/AI-Image-Classifier.git
+```json
+{
+  "success": true,
+  "allowed": false,
+  "risk": "nudity",
+  "confidence": 0.93,
+  "triggeredClass": "FEMALE_BREAST_EXPOSED",
+  "durationMs": 18,
+  "model": "NudeNet320n",
+  "detections": [{
+    "classId": 3,
+    "label": "FEMALE_BREAST_EXPOSED",
+    "confidence": 0.93,
+    "box": {"x": 0.12, "y": 0.28, "width": 0.24, "height": 0.31}
+  }],
+  "predictions": [{"label": "FEMALE_BREAST_EXPOSED", "confidence": 0.93}]
+}
 ```
 
-2. Open in Xcode:
+`predictions` is deprecated compatibility output. See `LOCAL_SERVER.md` for the
+complete contract, errors, lifecycle limits, and unsigned IPA instructions.
 
-```
-open AI-Image-Classifier.xcodeproj
-```
+## Accuracy and validation limits
 
-3. Run on:
+Detection and policy decisions can produce false positives and false negatives.
+They must not be treated as age verification, consent determination, or a
+substitute for human review. Real NSFW validation material is intentionally not
+committed. Validate privately on a physical device using lawfully obtained test
+material and do not record or redistribute it.
 
-* Simulator (limited features)
-* **Real device (recommended)**
+### iPad M3 benchmark
 
----
+No physical iPad M3 was available during CI verification, so values are not
+invented.
 
-## 📸 Screenshots
+| Metric | Result |
+|---|---|
+| Cold model load | Pending physical iPad M3 measurement |
+| Warm-up | Pending physical iPad M3 measurement |
+| First inference | Pending physical iPad M3 measurement |
+| Median warm inference | Pending physical iPad M3 measurement |
+| p95 warm inference | Pending physical iPad M3 measurement |
+| Peak memory | Pending physical iPad M3 measurement |
 
-[Screenshots/ClassificationImagePredictionResultDisplay.png](https://github.com/goutamroy/AI-Image-Classifier/blob/main/Screenshots/ClassificationImagePredictionResultDisplay.png)
+## Licensing
 
-[Screenshots/ClassificationImageSelected.png](https://github.com/goutamroy/AI-Image-Classifier/blob/main/Screenshots/ClassificationImageSelected.png)
+The NudeNet repository and `v3.4-weights` tag contain AGPL-3.0 license files,
+but NudeNet's PyPI metadata and `setup.py` declare MIT; the release does not
+state an unambiguous separate license for the weights. Ultralytics is AGPL-3.0
+and is used only during conversion. coremltools and the other conversion tools
+carry their respective BSD-style or bundled licenses. Resolve the NudeNet and
+weights discrepancy with the copyright holder or legal counsel before
+distribution. This inventory is not legal advice.
 
-[Screenshots/VoiceAssistant.png](https://github.com/goutamroy/AI-Image-Classifier/blob/main/Screenshots/VoiceAssistant.png)
+## Build
 
-[Screenshots/classification.png](https://github.com/goutamroy/AI-Image-Classifier/blob/main/Screenshots/classification.png)
-
-[Screenshots/home.png](https://github.com/goutamroy/AI-Image-Classifier/blob/main/Screenshots/home.png)
-
-
----
-
-## ⚠️ Notes
-
-* Camera is **not available in Simulator**
-* Speech recognition may be limited in Simulator
-* Best experience on **real iPhone device**
-
----
-
-## 📈 Future Improvements
-
-* Real-time object detection (Vision + CoreML)
-* Voice command → trigger actions (e.g., "Analyze Image")
-* Save scan history using SwiftData
-* Model optimization for performance
-* Offline caching and improvements
-
----
-
-## 👨‍💻 Author
-
-**Goutam Roy**
-Senior iOS Developer | AI/ML Enthusiast
-
----
-
+The project is `AI-Image-Classifier.xcodeproj`, scheme
+`AI-Image-Classifier`, target iOS 26.2. GitHub Actions validates the committed
+model, runs unit tests, performs a generic physical-device Release build with
+signing disabled, confirms the compiled model is in the `.app`, and packages an
+unsigned IPA. An unsigned IPA is not directly installable without a separate
+signing process.

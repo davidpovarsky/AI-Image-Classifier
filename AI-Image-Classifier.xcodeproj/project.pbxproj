@@ -13,6 +13,7 @@
 
 /* Begin PBXFileReference section */
 		06F59BBA2F8E5DEE001D303A /* AI-Image-Classifier.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "AI-Image-Classifier.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000001 /* AI-Image-ClassifierTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "AI-Image-ClassifierTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -21,9 +22,21 @@
 			path = "AI-Image-Classifier";
 			sourceTree = "<group>";
 		};
+		B20000000000000000000002 /* AI-Image-ClassifierTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "AI-Image-ClassifierTests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		B20000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		06F59BB72F8E5DEE001D303A /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -40,6 +53,7 @@
 			isa = PBXGroup;
 			children = (
 				06F59BBC2F8E5DEE001D303A /* AI-Image-Classifier */,
+				B20000000000000000000002 /* AI-Image-ClassifierTests */,
 				06F59BBB2F8E5DEE001D303A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -48,6 +62,7 @@
 			isa = PBXGroup;
 			children = (
 				06F59BBA2F8E5DEE001D303A /* AI-Image-Classifier.app */,
+				B20000000000000000000001 /* AI-Image-ClassifierTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -55,6 +70,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		B20000000000000000000003 /* AI-Image-ClassifierTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2000000000000000000000B /* Build configuration list for PBXNativeTarget "AI-Image-ClassifierTests" */;
+			buildPhases = (
+				B20000000000000000000006 /* Sources */,
+				B20000000000000000000004 /* Frameworks */,
+				B20000000000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B20000000000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B20000000000000000000002 /* AI-Image-ClassifierTests */,
+			);
+			name = "AI-Image-ClassifierTests";
+			packageProductDependencies = (
+			);
+			productName = "AI-Image-ClassifierTests";
+			productReference = B20000000000000000000001 /* AI-Image-ClassifierTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		06F59BB92F8E5DEE001D303A /* AI-Image-Classifier */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 06F59BC52F8E5DF2001D303A /* Build configuration list for PBXNativeTarget "AI-Image-Classifier" */;
@@ -112,11 +150,19 @@
 			projectRoot = "";
 			targets = (
 				06F59BB92F8E5DEE001D303A /* AI-Image-Classifier */,
+				B20000000000000000000003 /* AI-Image-ClassifierTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		B20000000000000000000005 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		06F59BB82F8E5DEE001D303A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -127,6 +173,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		B20000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		06F59BB62F8E5DEE001D303A /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,6 +190,38 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		B20000000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.personal.AI-Image-ClassifierTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AI-Image-Classifier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AI-Image-Classifier";
+			};
+			name = Debug;
+		};
+		B2000000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.personal.AI-Image-ClassifierTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AI-Image-Classifier.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AI-Image-Classifier";
+			};
+			name = Release;
+		};
 		06F59BC32F8E5DF2001D303A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -333,6 +418,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		B2000000000000000000000B /* Build configuration list for PBXNativeTarget "AI-Image-ClassifierTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B20000000000000000000009 /* Debug */,
+				B2000000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		06F59BB52F8E5DEE001D303A /* Build configuration list for PBXProject "AI-Image-Classifier" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -352,6 +446,24 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin PBXContainerItemProxy section */
+		B20000000000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 06F59BB22F8E5DEE001D303A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 06F59BB92F8E5DEE001D303A;
+			remoteInfo = "AI-Image-Classifier";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		B20000000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 06F59BB92F8E5DEE001D303A /* AI-Image-Classifier */;
+			targetProxy = B20000000000000000000007 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCRemoteSwiftPackageReference section */
 		A10000000000000000000005 /* XCRemoteSwiftPackageReference "FlyingFox" */ = {

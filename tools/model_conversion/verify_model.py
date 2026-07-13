@@ -36,9 +36,10 @@ def main() -> None:
     spec = model.get_spec()
     inputs = list(spec.description.input)
     outputs = list(spec.description.output)
-    if len(inputs) != 1 or not inputs[0].type.HasField("imageType"):
+    image_inputs = [item for item in inputs if item.type.HasField("imageType")]
+    if len(image_inputs) != 1:
         raise SystemExit(f"Expected one image input, got {[item.name for item in inputs]}")
-    image = inputs[0].type.imageType
+    image = image_inputs[0].type.imageType
     if (image.width, image.height) != (320, 320):
         raise SystemExit(f"Expected 320x320 input, got {image.width}x{image.height}")
     output_names = [item.name for item in outputs]

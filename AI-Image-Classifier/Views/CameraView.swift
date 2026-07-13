@@ -11,7 +11,7 @@ import AVFoundation
 struct CameraView: View {
     
     @StateObject private var cameraService = CameraService()
-    @StateObject private var viewModel = CameraViewModel.shared
+    @State private var viewModel = CameraViewModel.shared
     
     var body: some View {
         

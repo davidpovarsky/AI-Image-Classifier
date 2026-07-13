@@ -20,10 +20,10 @@ The output is `AI-Image-Classifier/Models/NudeNet320n.mlpackage`. Normal iOS
 builds consume the committed package and never install Python, PyTorch,
 Ultralytics, ONNX Runtime, or coremltools.
 
-The tested dependency versions are pinned in `requirements.txt`. The automated
-regeneration environment is Python 3.11 on GitHub's `macos-latest` image with
-the latest stable Xcode; each run prints the exact macOS, Xcode, Python, and
-package versions.
+The successful export environment was macOS 26.4, Xcode 26.6 (17F113), and
+Python 3.11.9. Exact tested conversion pins are Ultralytics 8.4.95,
+coremltools 9.0, PyTorch 2.13.0, torchvision 0.28.0, Pillow 12.3.0, and NumPy
+2.3.5. The workflow prints the environment and installed versions on every run.
 
 ## License review
 

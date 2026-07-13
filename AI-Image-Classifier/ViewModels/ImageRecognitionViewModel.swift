@@ -1,47 +1,30 @@
-//
-//  ImageRecognitionViewModel.swift
-//  ImageRecognitionMealScanning
-//
-//  Created by Goutam Roy on 13/04/26.
-//
-
 import Foundation
 import UIKit
-import Combine
 
+@MainActor
 final class ImageRecognitionViewModel: ObservableObject {
-    
-    @Published var results: [PredictionResult] = []
+    @Published var detections: [NudeDetection] = []
+    @Published var decision: NudityPolicyDecision?
     @Published var errorMessage: String?
     @Published var isLoading = false
-    
+
+    private let policy = NudityFilterPolicy()
+
     func classify(image: UIImage) {
         errorMessage = nil
         isLoading = true
-
         Task { [weak self] in
             guard let self else { return }
-
             do {
-                let predictions = try await CoreMLImageClassifier.shared.classify(image: image)
-                self.isLoading = false
-
-                if predictions.isEmpty {
-                    self.errorMessage = "No objects recognized. Try a clearer image."
-                    self.results = []
-                    return
-                }
-
-                self.results = predictions
-                    .map {
-                        PredictionResult(identifier: $0.label,
-                                         confidence: Double($0.confidence))
-                    }
-                    .sorted { $0.confidence > $1.confidence }
+                let batch = try await NudeNetService.shared.detect(image: image)
+                detections = batch.detections
+                decision = policy.evaluate(batch.detections)
+                isLoading = false
             } catch {
-                self.isLoading = false
-                self.results = []
-                self.errorMessage = "Image classification failed. Try another image."
+                isLoading = false
+                detections = []
+                decision = nil
+                errorMessage = "Nudity detection failed. Try another image."
             }
         }
     }

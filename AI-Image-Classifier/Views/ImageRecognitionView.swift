@@ -21,7 +21,7 @@ struct ImageRecognitionView: View {
             VStack(spacing: 20) {
                 
                 // MARK: Title
-                Text("Image Classification")
+                Text("Nudity Detection")
                     .font(.largeTitle)
                     .bold()
                 
@@ -79,18 +79,29 @@ struct ImageRecognitionView: View {
                 }
                 
                 // MARK: Results
-                if !viewModel.results.isEmpty {
+                if let decision = viewModel.decision {
+                    Text(decision.allowed ? "Allowed" : "Blocked")
+                        .font(.headline)
+                        .foregroundStyle(decision.allowed ? .green : .red)
+
+                    if viewModel.detections.isEmpty {
+                        Text("No NudeNet detections")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !viewModel.detections.isEmpty {
                     
-                    Text("Top Predictions")
+                    Text("Detections")
                         .font(.headline)
                         .padding(.top)
                     
                     VStack(spacing: 12) {
-                        ForEach(viewModel.results.prefix(3)) { result in
+                        ForEach(Array(viewModel.detections.enumerated()), id: \.offset) { _, result in
                             
                             VStack(alignment: .leading, spacing: 6) {
                                 
-                                Text(result.cleanLabel)
+                                Text(result.label.replacingOccurrences(of: "_", with: " ").capitalized)
                                     .font(.headline)
                                 
                                 HStack {
@@ -107,7 +118,7 @@ struct ImageRecognitionView: View {
                             .shadow(radius: 2)
                         }
                     }
-                    .animation(.easeInOut, value: viewModel.results)
+                    .animation(.easeInOut, value: viewModel.detections)
                 }
                 
                 Spacer()

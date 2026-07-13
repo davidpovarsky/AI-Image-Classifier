@@ -48,6 +48,7 @@ jobs:
 
       - name: Convert and verify model
         run: |
+          set -o pipefail
           python tools/model_conversion/convert_nudenet_320n.py
           python tools/model_conversion/verify_model.py | tee model-verification.json
 

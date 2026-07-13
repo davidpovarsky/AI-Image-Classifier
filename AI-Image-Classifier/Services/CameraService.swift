@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import CoreImage
 import UIKit
 import Combine // ✅ REQUIRED
 
@@ -15,6 +16,7 @@ final class CameraService: NSObject, ObservableObject {
     var previewLayer: AVCaptureVideoPreviewLayer?
     
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let imageContext = CIContext()
     
     override init() {
         super.init()
@@ -78,6 +80,11 @@ extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
         
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
-        CameraViewModel.shared.processFrame(pixelBuffer: pixelBuffer)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = imageContext.createCGImage(ciImage, from: ciImage.extent),
+              let data = UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.85) else { return }
+        Task { @MainActor in
+            CameraViewModel.shared.processFrame(imageData: data)
+        }
     }
 }
