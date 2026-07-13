@@ -2,6 +2,12 @@ name: Regenerate NudeNet Core ML model
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/local-coreml-http-server
+    paths:
+      - .github/workflows/regenerate-nudenet-model.yml
+      - tools/model_conversion/**
 
 permissions:
   contents: read
