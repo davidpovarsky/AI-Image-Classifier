@@ -76,7 +76,13 @@ actor CoreMLService {
         do {
             let config = MLModelConfiguration()
             config.computeUnits = .all
-            let coreMLModel = try MobileNetV2(configuration: config).model
+            guard let modelURL = Bundle.main.url(
+                forResource: "MobileNetV2",
+                withExtension: "mlmodelc"
+            ) else {
+                throw ServiceError.modelUnavailable
+            }
+            let coreMLModel = try MLModel(contentsOf: modelURL, configuration: config)
             model = .success(try VNCoreMLModel(for: coreMLModel))
         } catch {
             model = .failure(error)
