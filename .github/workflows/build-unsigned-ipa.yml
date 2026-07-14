@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - feature/local-coreml-http-server
+      - feature/raw-nudenet-inference-api
 
 permissions:
   contents: read
