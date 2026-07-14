@@ -1,28 +1,16 @@
 import Foundation
 
-nonisolated struct ClassificationResponseDTO: Codable, Sendable {
+nonisolated struct ClassificationResponseDTO: Codable, Equatable, Sendable {
     let success: Bool
-    let allowed: Bool
-    let risk: String
-    let confidence: Double
-    let triggeredClass: String?
-    let durationMs: Int
     let model: String
+    let durationMs: Int
     let detections: [NudeDetection]
-    let predictions: [ClassificationPrediction]
 
-    init(decision: NudityPolicyDecision, durationMs: Int) {
+    init(batch: NudeDetectionBatch) {
         success = true
-        allowed = decision.allowed
-        risk = decision.risk
-        confidence = decision.confidence
-        triggeredClass = decision.triggeredClass
-        self.durationMs = durationMs
         model = LocalServerConfiguration.modelName
-        detections = decision.detections
-        predictions = decision.detections.map {
-            ClassificationPrediction(label: $0.label, confidence: $0.confidence)
-        }
+        durationMs = batch.inferenceDurationMs
+        detections = batch.detections
     }
 }
 
@@ -33,7 +21,6 @@ nonisolated struct HealthResponseDTO: Codable, Equatable, Sendable {
     let modelLoaded: Bool
     let inputSize: Int
     let computeUnits: String
-    let policyVersion: Int
     let error: String?
 }
 
@@ -58,7 +45,6 @@ nonisolated enum LocalAPIContract {
             modelLoaded: ready,
             inputSize: 320,
             computeUnits: "all",
-            policyVersion: NudityFilterPolicy.version,
             error: error
         )
     }

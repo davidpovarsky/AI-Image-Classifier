@@ -8,12 +8,9 @@ model executions or per-request model loading.
 Images remain in memory and are never persisted, uploaded, or logged. Responses
 set `Cache-Control: no-store`. The limit is 10 MiB.
 
-The previous v1 contract used MobileNetV2 classification, returned only the
-three highest ImageNet `{label, confidence}` predictions, used HTTP 422 for
-undecodable bytes, and reported `{status, model, serverVersion}` from health.
-Version 2 preserves the endpoint paths, bearer token, raw-body transport, size
-limit, media types, and a deprecated `predictions` field while adding detector
-boxes and the policy decision. Invalid image bytes now use HTTP 400.
+The local server performs NudeNet inference only. It does not apply moderation,
+blocking, safety, or policy decisions. Clients must interpret detection labels
+and confidence values themselves.
 
 ## Authentication
 
@@ -28,12 +25,11 @@ Ready response (HTTP 200):
 ```json
 {
   "status": "ok",
-  "serverVersion": 2,
+  "serverVersion": 3,
   "model": "NudeNet320n",
   "modelLoaded": true,
   "inputSize": 320,
   "computeUnits": "all",
-  "policyVersion": 1,
   "error": null
 }
 ```
@@ -46,10 +42,31 @@ until readiness is true.
 
 Send raw JPEG, PNG, WebP, HEIC, or HEIF bytes with the matching `Content-Type`.
 JPEG and PNG decoding is validated before inference. HTTP 200 means inference
-succeeded, regardless of `allowed`. The response includes `allowed`, `risk`,
-maximum blocking `confidence`, `triggeredClass`, `durationMs`, `model`, all
-sorted detections, and normalized Vision-coordinate boxes. The `predictions`
-array mirrors detection labels/confidences temporarily and is deprecated.
+succeeded. The response includes the model name, inference duration, and every
+detection returned by NudeNet. Each detection contains its class ID, label,
+confidence, and normalized Vision-coordinate box. Detections are sorted by
+confidence in descending order.
+
+```json
+{
+  "success": true,
+  "model": "NudeNet320n",
+  "durationMs": 8,
+  "detections": [
+    {
+      "classId": 3,
+      "label": "FEMALE_BREAST_EXPOSED",
+      "confidence": 0.61,
+      "box": {
+        "x": 0.31,
+        "y": 0.22,
+        "width": 0.18,
+        "height": 0.24
+      }
+    }
+  ]
+}
+```
 
 Errors:
 
@@ -79,7 +96,8 @@ measurements in the README benchmark table.
 ## Scripting and unsigned IPA
 
 A future on-device Scripting workflow can POST raw file bytes with the bearer
-token and inspect `allowed` and `detections`. It must not use Base64 or multipart.
+token and interpret the returned detection labels and confidence values. It must
+not use Base64 or multipart.
 
 The **Build unsigned IPA** Action builds `generic/platform=iOS` with signing
 disabled and uploads artifact `AI-Image-Classifier-unsigned-ipa`, containing

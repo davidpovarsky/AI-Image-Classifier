@@ -12,7 +12,6 @@ struct LocalServerView: View {
                 LabeledContent("Address", value: LocalServerConfiguration.host)
                 LabeledContent("Port", value: String(server.configuration.port))
                 LabeledContent("Model", value: "NudeNet 320n")
-                LabeledContent("Threshold profile", value: server.thresholdProfile.capitalized)
             }
 
             Section("Model performance") {
@@ -23,9 +22,9 @@ struct LocalServerView: View {
 
             Section("Requests") {
                 LabeledContent("Total processed", value: String(server.metricsSnapshot.totalProcessed))
-                LabeledContent("Allowed", value: String(server.metricsSnapshot.totalAllowed))
-                LabeledContent("Blocked", value: String(server.metricsSnapshot.totalBlocked))
-                LabeledContent("Last triggered class", value: server.metricsSnapshot.lastTriggeredClass ?? "None")
+                LabeledContent("Total detections", value: String(server.metricsSnapshot.totalDetections))
+                LabeledContent("Last detection count", value: String(server.metricsSnapshot.lastDetectionCount))
+                LabeledContent("Last top detection", value: server.metricsSnapshot.lastTopDetection ?? "None")
             }
 
             Section("Authentication") {

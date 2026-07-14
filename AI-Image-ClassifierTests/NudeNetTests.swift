@@ -25,23 +25,32 @@ final class NudeNetTests: XCTestCase {
         XCTAssertFalse(NudityFilterPolicy(mode: .strict).evaluate(sample).allowed)
     }
 
-    func testAPIResponseEncodingIncludesCompatibilityPredictions() throws {
-        let decision = NudityFilterPolicy().evaluate([detection("FACE_FEMALE", 0.9)])
-        let response = ClassificationResponseDTO(decision: decision, durationMs: 12)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(response)) as? [String: Any])
-        XCTAssertEqual(object["allowed"] as? Bool, true)
-        XCTAssertEqual((object["detections"] as? [[String: Any]])?.count, 1)
-        XCTAssertEqual((object["predictions"] as? [[String: Any]])?.first?["label"] as? String, "FACE_FEMALE")
-        XCTAssertEqual(object["model"] as? String, "NudeNet320n")
-    }
+    func testRawInferenceAPIResponseEncoding() throws {
+        let batch = NudeDetectionBatch(
+            detections: [
+                detection("FACE_FEMALE", 0.9),
+                detection("FEMALE_BREAST_COVERED", 0.7)
+            ],
+            inferenceDurationMs: 12
+        )
 
-    func testBlockedAPIResponseEncoding() throws {
-        let decision = NudityFilterPolicy().evaluate([detection("ANUS_EXPOSED", 0.8)])
-        let response = ClassificationResponseDTO(decision: decision, durationMs: 8)
+        let response = ClassificationResponseDTO(batch: batch)
         let data = try JSONEncoder().encode(response)
-        let decoded = try JSONDecoder().decode(ClassificationResponseDTO.self, from: data)
-        XCTAssertFalse(decoded.allowed)
-        XCTAssertEqual(decoded.triggeredClass, "ANUS_EXPOSED")
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(object["success"] as? Bool, true)
+        XCTAssertEqual(object["model"] as? String, "NudeNet320n")
+        XCTAssertEqual(object["durationMs"] as? Int, 12)
+        XCTAssertEqual((object["detections"] as? [[String: Any]])?.count, 2)
+        XCTAssertEqual(Set(object.keys), ["success", "model", "durationMs", "detections"])
+        XCTAssertNil(object["allowed"])
+        XCTAssertNil(object["risk"])
+        XCTAssertNil(object["confidence"])
+        XCTAssertNil(object["triggeredClass"])
+        XCTAssertNil(object["predictions"])
+        XCTAssertNil(object["policyVersion"])
     }
 
     func testInvalidImageInput() async {
@@ -101,7 +110,7 @@ final class NudeNetTests: XCTestCase {
         XCTAssertEqual(ready.status, "ok")
         XCTAssertEqual(ready.model, "NudeNet320n")
         XCTAssertTrue(ready.modelLoaded)
-        XCTAssertEqual(ready.serverVersion, 2)
+        XCTAssertEqual(ready.serverVersion, 3)
     }
 
     func testLiveServerHealthAndSafeJPEGClassification() async throws {
@@ -142,6 +151,7 @@ final class NudeNetTests: XCTestCase {
         let classification = try JSONDecoder().decode(ClassificationResponseDTO.self, from: data)
         XCTAssertTrue(classification.success)
         XCTAssertEqual(classification.model, "NudeNet320n")
+        XCTAssertGreaterThanOrEqual(classification.durationMs, 0)
     }
 
     private func detection(_ label: String, _ confidence: Double) -> NudeDetection {

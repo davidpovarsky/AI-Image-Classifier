@@ -7,9 +7,9 @@ import OSLog
 nonisolated struct LocalInferenceMetricsSnapshot: Equatable, Sendable {
     var model = NudeNetServiceMetrics()
     var totalProcessed = 0
-    var totalAllowed = 0
-    var totalBlocked = 0
-    var lastTriggeredClass: String?
+    var totalDetections = 0
+    var lastDetectionCount = 0
+    var lastTopDetection: String?
 }
 
 actor LocalInferenceMetrics {
@@ -17,10 +17,11 @@ actor LocalInferenceMetrics {
 
     func updateModel(_ model: NudeNetServiceMetrics) { value.model = model }
 
-    func record(_ decision: NudityPolicyDecision, inferenceDurationMs: Int) {
+    func record(detections: [NudeDetection], inferenceDurationMs: Int) {
         value.totalProcessed += 1
-        if decision.allowed { value.totalAllowed += 1 } else { value.totalBlocked += 1 }
-        value.lastTriggeredClass = decision.triggeredClass
+        value.totalDetections += detections.count
+        value.lastDetectionCount = detections.count
+        value.lastTopDetection = detections.first?.label
         value.model.lastInferenceDurationMs = inferenceDurationMs
     }
 
@@ -51,7 +52,6 @@ final class LocalInferenceServer {
 
     private let server: HTTPServer
     private let detector: NudeNetService
-    private let policy: NudityFilterPolicy
     private let metrics: LocalInferenceMetrics
     private var lifecycleTask: Task<Void, Never>?
     private var modelPreparationTask: Task<Void, Never>?
@@ -60,12 +60,10 @@ final class LocalInferenceServer {
 
     init(
         configuration: LocalServerConfiguration = .makeDefault(),
-        detector: NudeNetService = .shared,
-        policy: NudityFilterPolicy = NudityFilterPolicy()
+        detector: NudeNetService = .shared
     ) {
         self.configuration = configuration
         self.detector = detector
-        self.policy = policy
         metrics = LocalInferenceMetrics()
         let address: sockaddr_in
         do {
@@ -82,7 +80,6 @@ final class LocalInferenceServer {
     var failed: Bool { state == .failed }
     var isRunning: Bool { running }
     var token: String { configuration.bearerToken }
-    var thresholdProfile: String { policy.profileName }
     var localURL: URL {
         var components = URLComponents()
         components.scheme = "http"
@@ -190,7 +187,6 @@ final class LocalInferenceServer {
         }
 
         let configuration = configuration
-        let policy = policy
         let metrics = metrics
         await server.appendRoute("POST /v1/classify") { request in
             guard LocalAPIContract.isAuthorized(
@@ -244,11 +240,11 @@ final class LocalInferenceServer {
                 let waitMs = Self.milliseconds(since: queued) - batch.inferenceDurationMs
                 Logger(subsystem: Bundle.main.bundleIdentifier ?? "AI-Image-Classifier", category: "inference")
                     .debug("Queue wait \(max(waitMs, 0), privacy: .public) ms; inference \(batch.inferenceDurationMs, privacy: .public) ms")
-                let decision = policy.evaluate(batch.detections)
-                await metrics.record(decision, inferenceDurationMs: batch.inferenceDurationMs)
-                return JSONHTTPResponse.make(
-                    ClassificationResponseDTO(decision: decision, durationMs: batch.inferenceDurationMs)
+                await metrics.record(
+                    detections: batch.detections,
+                    inferenceDurationMs: batch.inferenceDurationMs
                 )
+                return JSONHTTPResponse.make(ClassificationResponseDTO(batch: batch))
             } catch NudeNetService.ServiceError.invalidImage {
                 return JSONHTTPResponse.make(
                     ErrorResponseDTO(success: false, error: "invalid_image"),

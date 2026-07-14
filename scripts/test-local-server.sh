@@ -15,7 +15,13 @@ sips -s format png "$work/safe.ppm" --out "$work/safe.png" >/dev/null
 
 health_code="$(curl -sS -o "$work/health.json" -w '%{http_code}' "$BASE_URL/health")"
 test "$health_code" = 200
-jq -e '.status == "ok" and .model == "NudeNet320n" and .modelLoaded == true' "$work/health.json" >/dev/null
+jq -e '
+  .status == "ok" and
+  .serverVersion == 3 and
+  .model == "NudeNet320n" and
+  .modelLoaded == true and
+  (has("policyVersion") | not)
+' "$work/health.json" >/dev/null
 
 unauthorized_code="$(curl -sS -o "$work/unauthorized.json" -w '%{http_code}' \
   -H 'Content-Type: image/jpeg' --data-binary @"$work/safe.jpg" "$BASE_URL/v1/classify")"
@@ -27,9 +33,17 @@ for fixture in safe.jpg safe.png; do
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: $media" \
     --data-binary @"$work/$fixture" "$BASE_URL/v1/classify")"
   test "$code" = 200
-  jq -e '.success == true and (.allowed | type == "boolean") and
-    (.detections | type == "array") and (.durationMs | type == "number") and
-    .model == "NudeNet320n"' "$work/$fixture.json" >/dev/null
+  jq -e '
+    .success == true and
+    .model == "NudeNet320n" and
+    (.durationMs | type == "number") and
+    (.detections | type == "array") and
+    (has("allowed") | not) and
+    (has("risk") | not) and
+    (has("confidence") | not) and
+    (has("triggeredClass") | not) and
+    (has("predictions") | not)
+  ' "$work/$fixture.json" >/dev/null
 done
 
 malformed_code="$(printf 'not an image' | curl -sS -o "$work/malformed.json" -w '%{http_code}' \
