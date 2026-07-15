@@ -193,7 +193,7 @@ actor DiagnosticLogService {
             "modelIdentifier": modelIdentifier(),
             "processorCount": String(process.processorCount), "activeProcessorCount": String(process.activeProcessorCount),
             "physicalMemoryBytes": String(process.physicalMemory), "lowPowerModeEnabled": String(process.isLowPowerModeEnabled),
-            "screenScale": String(UIScreen.main.scale), "locale": Locale.current.identifier,
+            "screenScale": String(describing: UIScreen.main.scale), "locale": Locale.current.identifier,
             "timeZone": TimeZone.current.identifier, "thermalState": String(process.thermalState.rawValue)
         ]
     }
