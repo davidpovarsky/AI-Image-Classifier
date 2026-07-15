@@ -92,51 +92,6 @@ jobs:
               | tee build/build-diagnostics/conversion.log
           fi
 
-      - name: Build diagnostic conversion variants
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build/model-variants
-          variants=("trace float16 iOS17" "trace float16 iOS18" "trace float32 iOS17")
-          for variant in "${variants[@]}"; do
-            read -r method precision target <<< "$variant"
-            identifier="$method-$precision-${target,,}"
-            python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
-              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
-              --output "build/model-variants/$identifier" \
-              --export-method "$method" --precision "$precision" --deployment-target "$target"
-            python tools/MobileCLIPConversion/verify_conversion.py \
-              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
-              --models "build/model-variants/$identifier" \
-              --output "build/model-variants/$identifier/verification.json"
-            python tools/MobileCLIPConversion/inspect_mil_program.py \
-              "build/model-variants/$identifier/MobileCLIP2S2ImageEncoder.mlpackage" \
-              --output "build/model-variants/$identifier"
-          done
-          set +e
-          python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
-            --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
-            --output build/model-variants/export-float16-ios17 \
-            --export-method export --precision float16 --deployment-target iOS17 \
-            > build/build-diagnostics/torch-export.log 2>&1
-          export_status=$?
-          set -e
-          if [[ "$export_status" == 0 ]]; then
-            python tools/MobileCLIPConversion/verify_conversion.py \
-              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
-              --models build/model-variants/export-float16-ios17 \
-              --output build/model-variants/export-float16-ios17/verification.json
-            python tools/MobileCLIPConversion/inspect_mil_program.py \
-              build/model-variants/export-float16-ios17/MobileCLIP2S2ImageEncoder.mlpackage \
-              --output build/model-variants/export-float16-ios17
-          fi
-          python - "$export_status" <<'PY'
-          import json, pathlib, sys
-          status = int(sys.argv[1])
-          path = pathlib.Path("build/model-variants/export-float16-ios17-status.json")
-          path.write_text(json.dumps({"identifier":"export-float16-ios17","conversionSucceeded":status == 0,"toolchainSupported":status == 0}, indent=2) + "\n")
-          PY
-
       - name: Inspect primary MIL program
         shell: bash
         run: |
@@ -152,6 +107,77 @@ jobs:
             --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
             --models "$CONVERTED_DIR" \
             --output conversion-verification.json
+
+      - name: Build diagnostic conversion variants
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p build/model-variants
+          variants=("trace float16 iOS17" "trace float16 iOS18" "trace float32 iOS17")
+          for variant in "${variants[@]}"; do
+            read -r method precision target <<< "$variant"
+            identifier="$method-$precision-${target,,}"
+            set +e
+            python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --output "build/model-variants/$identifier" \
+              --export-method "$method" --precision "$precision" --deployment-target "$target" \
+              > "build/model-variants/$identifier.log" 2>&1
+            conversion_status=$?
+            verification_status=1
+            inspection_status=1
+            if [[ "$conversion_status" == 0 ]]; then
+              python tools/MobileCLIPConversion/verify_conversion.py \
+                --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+                --models "build/model-variants/$identifier" \
+                --output "build/model-variants/$identifier/verification.json" \
+                >> "build/model-variants/$identifier.log" 2>&1
+              verification_status=$?
+              python tools/MobileCLIPConversion/inspect_mil_program.py \
+                "build/model-variants/$identifier/MobileCLIP2S2ImageEncoder.mlpackage" \
+                --output "build/model-variants/$identifier" \
+                >> "build/model-variants/$identifier.log" 2>&1
+              inspection_status=$?
+            fi
+            python - "$identifier" "$conversion_status" "$verification_status" "$inspection_status" <<'PY'
+          import json, pathlib, sys
+          identifier, conversion, verification, inspection = sys.argv[1:]
+          path = pathlib.Path("build/model-variants") / f"{identifier}-status.json"
+          path.write_text(json.dumps({
+              "identifier": identifier, "conversionSucceeded": conversion == "0",
+              "verificationSucceeded": verification == "0", "inspectionSucceeded": inspection == "0"
+          }, indent=2) + "\n")
+          PY
+          done
+          python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+            --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+            --output build/model-variants/export-float16-ios17 \
+            --export-method export --precision float16 --deployment-target iOS17 \
+            > build/build-diagnostics/torch-export.log 2>&1
+          export_status=$?
+          export_verification_status=1
+          export_inspection_status=1
+          if [[ "$export_status" == 0 ]]; then
+            python tools/MobileCLIPConversion/verify_conversion.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --models build/model-variants/export-float16-ios17 \
+              --output build/model-variants/export-float16-ios17/verification.json
+            export_verification_status=$?
+            python tools/MobileCLIPConversion/inspect_mil_program.py \
+              build/model-variants/export-float16-ios17/MobileCLIP2S2ImageEncoder.mlpackage \
+              --output build/model-variants/export-float16-ios17
+            export_inspection_status=$?
+          fi
+          python - "$export_status" "$export_verification_status" "$export_inspection_status" <<'PY'
+          import json, pathlib, sys
+          conversion, verification, inspection = map(int, sys.argv[1:])
+          path = pathlib.Path("build/model-variants/export-float16-ios17-status.json")
+          path.write_text(json.dumps({
+              "identifier":"export-float16-ios17", "conversionSucceeded":conversion == 0,
+              "verificationSucceeded":verification == 0, "inspectionSucceeded":inspection == 0,
+              "toolchainSupported":conversion == 0
+          }, indent=2) + "\n")
+          PY
 
       - name: Validate all build inputs early
         shell: bash
@@ -310,6 +336,13 @@ jobs:
             echo "- IPA bytes: ${ipa_size:-unavailable}"
             echo "- Unit tests: see xcodebuild-tests.log"
             echo "- Conversion verification: ${verification:-unavailable}"
+            if [[ -s conversion-verification.json ]]; then
+              echo
+              echo '### Primary conversion verification'
+              echo '```json'
+              cat conversion-verification.json
+              echo '```'
+            fi
             if [[ -s build/build-diagnostics/conversion.log && ! -s conversion-verification.json ]]; then
               echo
               echo '<details><summary>Conversion failure tail</summary>'
@@ -326,6 +359,10 @@ jobs:
             conversion_error=${conversion_error//$'\r'/'%0D'}
             conversion_error=${conversion_error//$'\n'/'%0A'}
             echo "::error title=MobileCLIP2-S2 conversion failed::$conversion_error"
+          fi
+          if [[ -s conversion-verification.json && "$verification" != True ]]; then
+            verification_error=$(tr '\n' ' ' < conversion-verification.json)
+            echo "::error title=MobileCLIP2-S2 verification failed::$verification_error"
           fi
           cp model_manifest.json build/model-manifest.json 2>/dev/null || true
           cp conversion-verification.json build/conversion-verification.json 2>/dev/null || true
