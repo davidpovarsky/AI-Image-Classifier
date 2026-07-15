@@ -36,33 +36,15 @@ def main() -> None:
         MODEL_NAME, pretrained=str(args.checkpoint), image_mean=(0, 0, 0), image_std=(1, 1, 1)
     )
     model = reparameterize_model(model.eval()).eval()
-    tokenizer = open_clip.get_tokenizer(MODEL_NAME)
     image_coreml = ct.models.MLModel(str(args.models / "MobileCLIP2S2ImageEncoder.mlpackage"))
-    text_coreml = ct.models.MLModel(str(args.models / "MobileCLIP2S2TextEncoder.mlpackage"))
+    prompt_file = json.loads((args.models / "MobileCLIP2S2PromptEmbeddings.json").read_text())
 
     image_cosines: list[float] = []
-    text_cosines: list[float] = []
     ranking_matches = 0
-    all_prompts = [prompt for values in PROMPTS.values() for prompt in values]
-    tokens = tokenizer(all_prompts).to(torch.int32)
-    with torch.inference_mode():
-        torch_text = model.encode_text(tokens, normalize=True).cpu().numpy()
-    coreml_text = np.vstack([
-        first_output(text_coreml.predict({"text": token.numpy()[None, :].astype(np.int32)})).reshape(-1)
-        for token in tokens
-    ])
-    text_cosines.extend(cosine(a, b) for a, b in zip(torch_text, coreml_text))
-
-    torch_categories = []
-    coreml_categories = []
-    offset = 0
-    for prompts in PROMPTS.values():
-        count = len(prompts)
-        torch_categories.append(normalized_mean(torch_text[offset:offset + count]))
-        coreml_categories.append(normalized_mean(coreml_text[offset:offset + count]))
-        offset += count
-    torch_categories = np.asarray(torch_categories)
-    coreml_categories = np.asarray(coreml_categories)
+    categories = np.asarray([prompt_file["embeddings"][name] for name in PROMPTS])
+    max_differences: list[float] = []
+    mean_differences: list[float] = []
+    maximum_score_difference = 0.0
 
     rng = np.random.default_rng(20260715)
     with torch.inference_mode():
@@ -72,19 +54,26 @@ def main() -> None:
             torch_image = model.encode_image(preprocess(pil).unsqueeze(0), normalize=True).cpu().numpy()
             coreml_image = first_output(image_coreml.predict({"image": pil})).reshape(1, -1)
             image_cosines.append(cosine(torch_image, coreml_image))
-            torch_rank = np.argsort(-(torch_image @ torch_categories.T).reshape(-1))
-            coreml_rank = np.argsort(-(coreml_image @ coreml_categories.T).reshape(-1))
-            ranking_matches += int(np.array_equal(torch_rank, coreml_rank))
+            difference = np.abs(torch_image - coreml_image)
+            max_differences.append(float(difference.max()))
+            mean_differences.append(float(difference.mean()))
+            torch_scores = (torch_image @ categories.T).reshape(-1)
+            coreml_scores = (coreml_image @ categories.T).reshape(-1)
+            maximum_score_difference = max(maximum_score_difference, float(np.max(np.abs(torch_scores - coreml_scores))))
+            ranking_matches += int(torch_scores.argmax() == coreml_scores.argmax())
 
     result = {
         "model": MODEL_NAME,
         "samples": 10,
         "minimumImageEmbeddingCosine": min(image_cosines),
-        "minimumTextEmbeddingCosine": min(text_cosines),
-        "identicalRankingSamples": ranking_matches,
+        "sameTopCategorySamples": ranking_matches,
+        "maximumAbsoluteEmbeddingDifference": max(max_differences),
+        "meanAbsoluteEmbeddingDifference": float(np.mean(mean_differences)),
+        "maximumScoreDifference": maximum_score_difference,
+        "finite": bool(np.isfinite(image_cosines + max_differences + mean_differences).all()),
         "normalizationVerified": True,
         "softmaxVerified": True,
-        "passed": min(image_cosines) >= 0.995 and min(text_cosines) >= 0.999 and ranking_matches >= 9,
+        "passed": min(image_cosines) >= 0.995 and ranking_matches == 10 and maximum_score_difference <= 0.03,
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

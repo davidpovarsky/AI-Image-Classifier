@@ -74,7 +74,7 @@ final class PersonClassifierTests: XCTestCase {
         let data = try JSONEncoder().encode(response)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["model"] as? String, "MobileCLIP2-S2")
-        XCTAssertEqual(object["serverVersion"] as? Int, 4)
+        XCTAssertEqual(object["serverVersion"] as? Int, 5)
         XCTAssertEqual(object["peopleCount"] as? Int, 1)
         XCTAssertNil(object["allowed"])
         XCTAssertNil(object["blocked"])
@@ -93,19 +93,61 @@ final class PersonClassifierTests: XCTestCase {
         var metrics = MobileCLIPServiceMetrics()
         metrics.state = .ready
         metrics.imageEncoderLoaded = true
-        metrics.textEncoderLoaded = true
-        XCTAssertEqual(LocalAPIContract.health(from: metrics).status, "error")
         metrics.promptEmbeddingsReady = true
+        metrics.smokeTestPassed = true
+        metrics.selectedComputeUnits = "cpuOnly"
         let health = LocalAPIContract.health(from: metrics)
         XCTAssertEqual(health.status, "ok")
-        XCTAssertEqual(health.serverVersion, 4)
+        XCTAssertEqual(health.serverVersion, 5)
         XCTAssertEqual(health.model, "MobileCLIP2-S2")
+        XCTAssertFalse(health.textEncoderBundled)
+        XCTAssertEqual(health.modelPrecision, "float16")
     }
 
     func testInvalidToken() {
         XCTAssertFalse(LocalAPIContract.isAuthorized(header: nil, token: "secret"))
         XCTAssertFalse(LocalAPIContract.isAuthorized(header: "Bearer wrong", token: "secret"))
         XCTAssertTrue(LocalAPIContract.isAuthorized(header: "Bearer secret", token: "secret"))
+    }
+
+    func testDiagnosticRedactionRemovesBearerTokenAndContainerIdentifier() {
+        let value = DiagnosticLogService.redact("Bearer secret-token /Bundle/Application/01234567-89AB-CDEF-0123-456789ABCDEF/App.app")
+        XCTAssertFalse(value.contains("secret-token"))
+        XCTAssertTrue(value.contains("<APP_CONTAINER>"))
+    }
+
+    func testErrorSerializationIncludesCoreMLErrorCodeAndUnderlyingError() {
+        let underlying = NSError(domain: "com.apple.CoreML", code: -14)
+        let outer = NSError(domain: "test", code: 1, userInfo: [NSUnderlyingErrorKey: underlying])
+        let errors = DiagnosticLogService.flattenedErrors(outer)
+        XCTAssertEqual(errors.map(\.code), [1, -14])
+    }
+
+    func testComputeUnitFallbackOrderIsDiagnosticFirst() {
+        XCTAssertEqual(MobileCLIPService.computeUnitFallbackOrder, ["cpuAndGPU", "cpuOnly", "all"])
+    }
+
+    func testDiagnosticSessionCreatesFilesWritesJSONLAndExports() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = DiagnosticLogService(documentsURL: root)
+        try await service.startSession()
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<20 {
+                group.addTask { try? await service.log(level: "info", category: "test", event: "event-\(index)") }
+            }
+        }
+        let optionalSnapshot = await service.snapshot()
+        let snapshot = try XCTUnwrap(optionalSnapshot)
+        XCTAssertEqual(snapshot.eventCount, 21)
+        for name in ["runtime.log", "events.jsonl", "device.json", "app.json", "model-manifest.json", "model-load-attempts.json", "health-snapshots.jsonl", "inference-events.jsonl", "summary.json"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.folderURL.appending(path: name).path()))
+        }
+        let lines = try String(contentsOf: snapshot.folderURL.appending(path: "events.jsonl"), encoding: .utf8)
+            .split(separator: "\n")
+        XCTAssertEqual(lines.count, 21)
+        let export = try await service.exportLatestSession()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: export.path()))
     }
 
     func testUIImageOrientationMapping() {

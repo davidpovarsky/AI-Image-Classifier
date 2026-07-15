@@ -70,11 +70,39 @@ nonisolated enum MobileCLIPModelState: Equatable, Sendable {
 nonisolated struct MobileCLIPServiceMetrics: Equatable, Sendable {
     var state: MobileCLIPModelState = .notLoaded
     var imageEncoderLoaded = false
-    var textEncoderLoaded = false
     var promptEmbeddingsReady = false
+    var selectedComputeUnits: String?
+    var stage = "notLoaded"
+    var smokeTestPassed = false
+    var loadAttempts: [ModelLoadAttempt] = []
     var loadDurationMs: Int?
     var lastInferenceDurationMs: Int?
     var modelLoadCount = 0
+}
+
+nonisolated struct DiagnosticError: Codable, Equatable, Sendable {
+    let domain: String
+    let code: Int
+    let description: String
+    let failureReason: String?
+    let recoverySuggestion: String?
+    let userInfo: [String: String]
+}
+
+nonisolated struct ModelLoadAttempt: Codable, Equatable, Sendable, Identifiable {
+    var id: String { "\(timestamp)-\(computeUnits)" }
+    let timestamp: String
+    let modelName: String
+    let modelURL: String
+    let computeUnits: String
+    let succeeded: Bool
+    let durationMs: Int
+    let errorDomain: String?
+    let errorCode: Int?
+    let errorDescription: String?
+    let failureReason: String?
+    let recoverySuggestion: String?
+    let underlyingErrors: [DiagnosticError]
 }
 
 nonisolated enum InferenceMode: Sendable {

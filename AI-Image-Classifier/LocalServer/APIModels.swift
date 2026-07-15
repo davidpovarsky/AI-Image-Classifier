@@ -28,11 +28,24 @@ nonisolated struct HealthResponseDTO: Codable, Equatable, Sendable {
     let model: String
     let modelLoaded: Bool
     let imageEncoderLoaded: Bool
-    let textEncoderLoaded: Bool
+    let textEncoderBundled: Bool
     let promptEmbeddingsReady: Bool
+    let selectedComputeUnits: String?
+    let modelPrecision: String
     let humanDetector: String
-    let computeUnits: String
     let error: String?
+}
+
+nonisolated struct DiagnosticsStatusDTO: Codable, Equatable, Sendable {
+    let sessionId: String
+    let state: String
+    let stage: String
+    let model: String
+    let precision: String
+    let deploymentTarget: String
+    let selectedComputeUnits: String?
+    let attempts: [ModelLoadAttempt]
+    let logFilesAvailable: Bool
 }
 
 nonisolated struct ErrorResponseDTO: Codable, Equatable, Sendable {
@@ -48,8 +61,8 @@ nonisolated enum LocalAPIContract {
     static func health(from snapshot: MobileCLIPServiceMetrics) -> HealthResponseDTO {
         let ready = snapshot.state == .ready
             && snapshot.imageEncoderLoaded
-            && snapshot.textEncoderLoaded
             && snapshot.promptEmbeddingsReady
+            && snapshot.smokeTestPassed
         let error: String?
         if case .failed(let message) = snapshot.state { error = message } else { error = nil }
         return HealthResponseDTO(
@@ -58,10 +71,11 @@ nonisolated enum LocalAPIContract {
             model: LocalServerConfiguration.modelName,
             modelLoaded: ready,
             imageEncoderLoaded: snapshot.imageEncoderLoaded,
-            textEncoderLoaded: snapshot.textEncoderLoaded,
+            textEncoderBundled: false,
             promptEmbeddingsReady: snapshot.promptEmbeddingsReady,
+            selectedComputeUnits: snapshot.selectedComputeUnits,
+            modelPrecision: "float16",
             humanDetector: "VNDetectHumanRectanglesRequest",
-            computeUnits: "all",
             error: error
         )
     }

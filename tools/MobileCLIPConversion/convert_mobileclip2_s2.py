@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Convert Apple's official MobileCLIP2-S2 checkpoint to two Core ML packages."""
+"""Convert Apple's official MobileCLIP2-S2 image encoder and precompute prompts."""
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import pathlib
 
@@ -63,6 +64,24 @@ def normalized_mean(vectors: np.ndarray) -> np.ndarray:
     return mean / np.linalg.norm(mean)
 
 
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_tree(root: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode())
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def metadata(checkpoint: pathlib.Path) -> dict[str, str]:
     return {
         "com.github.apple.ml-mobileclip.source": "https://github.com/apple/ml-mobileclip",
@@ -82,6 +101,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("AI-Image-Classifier/Models"))
+    parser.add_argument("--export-method", choices=("trace", "export"), default="trace")
+    parser.add_argument("--precision", choices=("float16", "float32"), default="float16")
+    parser.add_argument("--deployment-target", choices=("iOS17", "iOS18"), default="iOS17")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -98,22 +120,24 @@ def main() -> None:
     image_wrapper = ImageEncoder(model).eval()
     text_wrapper = TextEncoder(model).eval()
     image_example = torch.rand(1, 3, IMAGE_SIZE, IMAGE_SIZE)
-    text_example = tokenizer(["a photo of a person"]).to(torch.int32)
     # PyTorch 2.8's inference fast path emits _native_multi_head_attention,
     # which coremltools 9.0 does not translate. The decomposed path is
     # numerically equivalent and is verified against the source model below.
     torch.backends.mha.set_fastpath_enabled(False)
     with torch.inference_mode():
-        traced_image = torch.jit.trace(image_wrapper, image_example)
-        traced_text = torch.jit.trace(text_wrapper, text_example)
+        exported_image = (
+            torch.jit.trace(image_wrapper, image_example)
+            if args.export_method == "trace"
+            else torch.export.export(image_wrapper, (image_example,))
+        )
 
     common = dict(
         convert_to="mlprogram",
-        minimum_deployment_target=ct.target.iOS26,
-        compute_precision=ct.precision.FLOAT32,
+        minimum_deployment_target=getattr(ct.target, args.deployment_target),
+        compute_precision=ct.precision.FLOAT16 if args.precision == "float16" else ct.precision.FLOAT32,
     )
     image_model = ct.convert(
-        traced_image,
+        exported_image,
         inputs=[ct.ImageType(
             name="image", shape=image_example.shape, scale=1 / 255.0,
             bias=[0.0, 0.0, 0.0], color_layout=ct.colorlayout.RGB,
@@ -121,22 +145,14 @@ def main() -> None:
         outputs=[ct.TensorType(name="embedding")],
         **common,
     )
-    text_model = ct.convert(
-        traced_text,
-        inputs=[ct.TensorType(name="text", shape=text_example.shape, dtype=np.int32)],
-        outputs=[ct.TensorType(name="embedding")],
-        **common,
-    )
-    for converted in (image_model, text_model):
+    for converted in (image_model,):
         converted.author = "Converted from Apple MobileCLIP2-S2 by this repository"
         converted.license = "Apple Machine Learning Research Model License Agreement"
         converted.short_description = "MobileCLIP2-S2 normalized embedding encoder"
         converted.user_defined_metadata.update(metadata(args.checkpoint))
 
     image_path = args.output / "MobileCLIP2S2ImageEncoder.mlpackage"
-    text_path = args.output / "MobileCLIP2S2TextEncoder.mlpackage"
     image_model.save(str(image_path))
-    text_model.save(str(text_path))
 
     category_embeddings: dict[str, list[float]] = {}
     with torch.inference_mode():
@@ -150,9 +166,40 @@ def main() -> None:
         "promptConfigurationHash": prompt_hash,
         "embeddings": category_embeddings,
     }
-    (args.output / "MobileCLIP2S2PromptEmbeddings.json").write_text(
+    prompt_path = args.output / "MobileCLIP2S2PromptEmbeddings.json"
+    prompt_path.write_text(
         json.dumps(prompt_file, indent=2) + "\n"
     )
+    manifest = {
+        "model": MODEL_NAME,
+        "source": MODEL_ID,
+        "revision": "72424e7025436db18f15c3eff6ee8c7c15ad4481",
+        "checkpoint": args.checkpoint.name,
+        "checkpointSHA256": "37c2d839a856491f2fcc82c40dc28672dbd0907235b4cd4c38dfff6457f0c09f",
+        "imageEncoder": image_path.name,
+        "imageEncoderSHA256": sha256_tree(image_path),
+        "promptEmbeddingsSHA256": sha256_file(prompt_path),
+        "textEncoderBundled": False,
+        "precision": args.precision,
+        "deploymentTarget": args.deployment_target,
+        "exportMethod": "torch.jit.trace" if args.export_method == "trace" else "torch.export",
+        "preprocessing": {
+            "inputSize": [1, 3, IMAGE_SIZE, IMAGE_SIZE], "colorLayout": "RGB",
+            "imageScale": 1 / 255.0, "bias": [0, 0, 0],
+            "resizeMode": "aspect-fill", "cropMode": "center", "normalization": "none; model internal preprocessing",
+        },
+    }
+    (args.output / "MobileCLIP2S2ModelManifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    report = {
+        "identifier": f"{args.export_method}-{args.precision}-{args.deployment_target.lower()}",
+        "exportMethod": manifest["exportMethod"], "precision": args.precision,
+        "deploymentTarget": args.deployment_target, "modelSizeBytes": sum(
+            path.stat().st_size for path in image_path.rglob("*") if path.is_file()
+        ),
+        "conversionSucceeded": True, "verificationSucceeded": None,
+        "milOperations": {}, "staticShapes": True,
+    }
+    (args.output / "MobileCLIP2S2ConversionReport.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -17,12 +17,13 @@ health_code="$(curl -sS -o "$work/health.json" -w '%{http_code}' "$BASE_URL/heal
 test "$health_code" = 200
 jq -e '
   .status == "ok" and
-  .serverVersion == 4 and
+  .serverVersion == 5 and
   .model == "MobileCLIP2-S2" and
   .modelLoaded == true and
   .imageEncoderLoaded == true and
-  .textEncoderLoaded == true and
-  .promptEmbeddingsReady == true
+  .textEncoderBundled == false and
+  .promptEmbeddingsReady == true and
+  .modelPrecision == "float16"
 ' "$work/health.json" >/dev/null
 
 unauthorized_code="$(curl -sS -o "$work/unauthorized.json" -w '%{http_code}' \
@@ -38,7 +39,7 @@ for fixture in safe.jpg safe.png; do
   jq -e '
     .success == true and
     .model == "MobileCLIP2-S2" and
-    .serverVersion == 4 and
+    .serverVersion == 5 and
     (.durationMs | type == "number") and
     (.people | type == "array") and
     (.peopleCount == (.people | length)) and

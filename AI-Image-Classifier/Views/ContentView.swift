@@ -41,6 +41,11 @@ struct ContentView: View {
                     LocalServerView()
                 }
                 .buttonStyle(.bordered)
+
+                NavigationLink("Diagnostics") {
+                    DiagnosticsView()
+                }
+                .buttonStyle(.bordered)
                 
                 Divider()
                 

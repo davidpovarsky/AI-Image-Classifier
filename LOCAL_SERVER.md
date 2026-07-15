@@ -1,8 +1,8 @@
 # Local MobileCLIP2-S2 HTTP server
 
 The app listens only on `http://127.0.0.1:8765`. A coordinator actor serializes
-Vision, crop, and Core ML work. Both encoders and the prompt-category embeddings
-are retained in memory and are never recreated for each crop.
+Vision, crop, and Core ML work. The image encoder and precomputed prompt-category
+embeddings are retained in memory. The text encoder is not bundled.
 
 Images remain in memory and responses use `Cache-Control: no-store`. The raw
 request-body limit is 10 MiB. The server is a neutral inference engine; client
@@ -16,20 +16,21 @@ and image data are not logged.
 
 ## `GET /health`
 
-HTTP 200 is returned only when the image encoder, text encoder, and prompt
-embeddings are all ready:
+HTTP 200 is returned only when the image encoder, prompt embeddings, runtime
+configuration, and startup smoke test are ready:
 
 ```json
 {
   "status": "ok",
-  "serverVersion": 4,
+  "serverVersion": 5,
   "model": "MobileCLIP2-S2",
   "modelLoaded": true,
   "imageEncoderLoaded": true,
-  "textEncoderLoaded": true,
+  "textEncoderBundled": false,
   "promptEmbeddingsReady": true,
+  "selectedComputeUnits": "cpuAndGPU",
+  "modelPrecision": "float16",
   "humanDetector": "VNDetectHumanRectanglesRequest",
-  "computeUnits": "all",
   "error": null
 }
 ```
@@ -45,7 +46,7 @@ Send raw JPEG, PNG, HEIC, or HEIF data with the matching `Content-Type`.
 {
   "success": true,
   "model": "MobileCLIP2-S2",
-  "serverVersion": 4,
+  "serverVersion": 5,
   "durationMs": 83,
   "imageWidth": 1920,
   "imageHeight": 1080,

@@ -39,6 +39,7 @@ nonisolated enum EmbeddingMath {
 
 actor MobileCLIPService {
     static let shared = MobileCLIPService()
+    nonisolated static let computeUnitFallbackOrder = ["cpuAndGPU", "cpuOnly", "all"]
 
     enum ServiceError: Error, Equatable {
         case modelUnavailable
@@ -55,14 +56,15 @@ actor MobileCLIPService {
     }
 
     private let configuration: PersonClassifierConfiguration
+    private let diagnostics: DiagnosticLogService
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var imageEncoder: MLModel?
-    private var textEncoder: MLModel?
     private var categoryEmbeddings: [PersonVisualClass: [Float]] = [:]
     private var metrics = MobileCLIPServiceMetrics()
 
-    init(configuration: PersonClassifierConfiguration = .default) {
+    init(configuration: PersonClassifierConfiguration = .default, diagnostics: DiagnosticLogService = .shared) {
         self.configuration = configuration
+        self.diagnostics = diagnostics
     }
 
     func snapshot() -> MobileCLIPServiceMetrics { metrics }
@@ -70,42 +72,76 @@ actor MobileCLIPService {
     func loadIfNeeded() async throws {
         if metrics.state == .ready { return }
         metrics.state = .loading
+        metrics.stage = "promptEmbeddingsLoad"
         let started = ContinuousClock.now
         do {
-            let modelConfiguration = MLModelConfiguration()
-            modelConfiguration.computeUnits = .all
-            imageEncoder = try MLModel(
-                contentsOf: Self.bundledURL(named: "MobileCLIP2S2ImageEncoder", extension: "mlmodelc"),
-                configuration: modelConfiguration
-            )
-            metrics.imageEncoderLoaded = true
-            textEncoder = try MLModel(
-                contentsOf: Self.bundledURL(named: "MobileCLIP2S2TextEncoder", extension: "mlmodelc"),
-                configuration: modelConfiguration
-            )
-            metrics.textEncoderLoaded = true
             categoryEmbeddings = try Self.loadPromptEmbeddings()
             metrics.promptEmbeddingsReady = categoryEmbeddings.count == PersonVisualClass.allCases.count
             guard metrics.promptEmbeddingsReady else { throw ServiceError.promptEmbeddingsUnavailable }
+            try? await diagnostics.log(level: "info", category: "model", event: "promptEmbeddingsLoaded", details: ["categories": String(categoryEmbeddings.count)])
+            let modelURL = try Self.bundledURL(named: "MobileCLIP2S2ImageEncoder", extension: "mlmodelc")
+            try? await diagnostics.log(level: "info", category: "modelLoad", event: "modelURLResolved", details: ["url": modelURL.path()])
+            metrics.stage = "imageEncoderLoad"
+            let candidates: [(MLComputeUnits, String)] = [(.cpuAndGPU, "cpuAndGPU"), (.cpuOnly, "cpuOnly"), (.all, "all")]
+            for (units, name) in candidates {
+                let attemptStarted = ContinuousClock.now
+                try? await diagnostics.log(level: "info", category: "modelLoad", event: "attemptStarted", details: ["computeUnits": name])
+                do {
+                    let modelConfiguration = MLModelConfiguration()
+                    modelConfiguration.computeUnits = units
+                    let model = try MLModel(contentsOf: modelURL, configuration: modelConfiguration)
+                    metrics.stage = "smokeTest"
+                    try? await diagnostics.log(level: "info", category: "modelLoad", event: "smokeTestStarted", details: ["computeUnits": name])
+                    try await smokeTest(model)
+                    let attempt = Self.attempt(url: modelURL, units: name, started: attemptStarted, error: nil)
+                    metrics.loadAttempts.append(attempt)
+                    imageEncoder = model
+                    metrics.imageEncoderLoaded = true
+                    metrics.smokeTestPassed = true
+                    metrics.selectedComputeUnits = name
+                    try? await diagnostics.log(level: "info", category: "modelLoad", event: "smokeTestSucceeded", details: ["computeUnits": name])
+                    break
+                } catch {
+                    let attempt = Self.attempt(url: modelURL, units: name, started: attemptStarted, error: error)
+                    metrics.loadAttempts.append(attempt)
+                    try? await diagnostics.log(level: "error", category: "modelLoad", event: metrics.stage == "smokeTest" ? "smokeTestFailed" : "attemptFailed", details: [
+                        "computeUnits": name, "domain": attempt.errorDomain ?? "unknown",
+                        "code": String(attempt.errorCode ?? 0), "description": attempt.errorDescription ?? "unknown"
+                    ])
+                    metrics.stage = "imageEncoderLoad"
+                }
+                try? await diagnostics.recordLoadAttempts(metrics.loadAttempts)
+            }
+            guard imageEncoder != nil, metrics.smokeTestPassed else { throw ServiceError.modelUnavailable }
             metrics.loadDurationMs = Self.milliseconds(since: started)
             metrics.modelLoadCount += 1
+            metrics.stage = "ready"
             metrics.state = .ready
         } catch {
             imageEncoder = nil
-            textEncoder = nil
             categoryEmbeddings = [:]
             metrics.imageEncoderLoaded = false
-            metrics.textEncoderLoaded = false
-            metrics.promptEmbeddingsReady = false
+            metrics.smokeTestPassed = false
             metrics.state = .failed("MobileCLIP2-S2 assets could not be loaded: \(error.localizedDescription)")
+            try? await diagnostics.recordLoadAttempts(metrics.loadAttempts)
             throw ServiceError.modelUnavailable
         }
     }
 
-    func classify(_ crop: PersonCrop) async throws -> PersonClassification {
+    func reload() async throws {
+        imageEncoder = nil
+        categoryEmbeddings = [:]
+        metrics = MobileCLIPServiceMetrics()
+        try await loadIfNeeded()
+    }
+
+    func classify(_ crop: PersonCrop, requestID: UUID? = nil) async throws -> PersonClassification {
         try await loadIfNeeded()
         guard let imageEncoder else { throw ServiceError.modelUnavailable }
         let started = ContinuousClock.now
+        try? await diagnostics.log(level: "info", category: "inference", event: "inferenceStarted", details: [
+            "requestId": requestID?.uuidString ?? "direct", "personId": crop.id.uuidString
+        ])
         let pixelBuffer = try makePixelBuffer(from: crop.image)
         guard let inputName = imageEncoder.modelDescription.inputDescriptionsByName.first(where: {
             $0.value.type == .image
@@ -134,6 +170,26 @@ actor MobileCLIPService {
             throw ServiceError.numericalFailure
         }
         metrics.lastInferenceDurationMs = Self.milliseconds(since: started)
+        try? await diagnostics.log(level: "info", category: "inference", event: "inferenceCompleted", details: [
+            "personId": crop.id.uuidString, "durationMs": String(metrics.lastInferenceDurationMs ?? 0),
+            "embeddingLength": String(imageEmbedding.count), "predictedClass": classes[winningIndex].rawValue
+        ])
+        let finite = imageEmbedding.filter(\.isFinite)
+        try? await diagnostics.appendInference([
+            "requestId": requestID?.uuidString ?? "direct", "personId": crop.id.uuidString,
+            "detectionSource": crop.detectionSource.rawValue,
+            "personDetectionConfidence": String(crop.detectionConfidence),
+            "cropWidth": String(crop.image.width), "cropHeight": String(crop.image.height),
+            "modelInputWidth": "256", "modelInputHeight": "256",
+            "inferenceDurationMs": String(metrics.lastInferenceDurationMs ?? 0),
+            "embeddingLength": String(imageEmbedding.count),
+            "embeddingNorm": String(sqrt(imageEmbedding.reduce(0) { $0 + $1 * $1 })),
+            "embeddingMin": String(finite.min() ?? 0), "embeddingMax": String(finite.max() ?? 0),
+            "finiteCount": String(finite.count), "nanCount": String(imageEmbedding.count - finite.count),
+            "woman": String(probabilities[0]), "man": String(probabilities[1]),
+            "uncertain": String(probabilities[2]), "notPerson": String(probabilities[3]),
+            "predictedClass": classes[winningIndex].rawValue
+        ])
         return PersonClassification(
             id: crop.id,
             detectionSource: crop.detectionSource,
@@ -153,6 +209,33 @@ actor MobileCLIPService {
                 notPerson: probabilities[3]
             )
         )
+    }
+
+    private func smokeTest(_ model: MLModel) async throws {
+        guard let inputName = model.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image })?.key else {
+            throw ServiceError.unsupportedModelOutput
+        }
+        let buffer = try makeBlankPixelBuffer()
+        let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: MLFeatureValue(pixelBuffer: buffer)])
+        let output = try await model.prediction(from: provider)
+        guard let array = output.featureNames.lazy.compactMap({ output.featureValue(for: $0)?.multiArrayValue }).first else {
+            throw ServiceError.unsupportedModelOutput
+        }
+        let embedding = Self.floatArray(from: array)
+        guard let expected = categoryEmbeddings.values.first?.count,
+              embedding.count == expected, EmbeddingMath.normalize(embedding) != nil else {
+            throw ServiceError.numericalFailure
+        }
+    }
+
+    private func makeBlankPixelBuffer() throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, 256, 256, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess,
+              let buffer else { throw ServiceError.invalidImage }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer) { memset(base, 0, CVPixelBufferGetDataSize(buffer)) }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        return buffer
     }
 
     private func makePixelBuffer(from image: CGImage) throws -> CVPixelBuffer {
@@ -214,5 +297,19 @@ actor MobileCLIPService {
         let duration = start.duration(to: .now)
         return Int(duration.components.seconds * 1_000)
             + Int(duration.components.attoseconds / 1_000_000_000_000_000)
+    }
+
+    nonisolated private static func attempt(
+        url: URL, units: String, started: ContinuousClock.Instant, error: Error?
+    ) -> ModelLoadAttempt {
+        let root = error.map { $0 as NSError }
+        return ModelLoadAttempt(
+            timestamp: Date().ISO8601Format(), modelName: LocalServerConfiguration.modelName,
+            modelURL: DiagnosticLogService.redact(url.path()), computeUnits: units,
+            succeeded: error == nil, durationMs: milliseconds(since: started),
+            errorDomain: root?.domain, errorCode: root?.code, errorDescription: root?.localizedDescription,
+            failureReason: root?.localizedFailureReason, recoverySuggestion: root?.localizedRecoverySuggestion,
+            underlyingErrors: error.map { DiagnosticLogService.flattenedErrors($0) } ?? []
+        )
     }
 }

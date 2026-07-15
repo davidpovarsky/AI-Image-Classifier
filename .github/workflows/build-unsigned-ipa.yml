@@ -8,10 +8,12 @@ on:
       - feature/local-coreml-http-server
       - feature/raw-nudenet-inference-api
       - feature/mobileclip2-person-classifier
+      - fix/mobileclip2-ios-device-runtime
   pull_request:
     branches:
       - main
       - feature/mobileclip2-person-classifier
+      - fix/mobileclip2-ios-device-runtime
 
 permissions:
   contents: read
@@ -19,7 +21,7 @@ permissions:
 jobs:
   build-test-package:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       APP_MODELS: AI-Image-Classifier/Models
       CHECKPOINT_DIR: .model-cache/mobileclip2-s2
@@ -49,7 +51,7 @@ jobs:
           path: |
             .model-cache/mobileclip2-s2
             .model-cache/coreml-mobileclip2-s2
-          key: mobileclip2-s2-fp32-${{ runner.os }}-${{ hashFiles('tools/MobileCLIPConversion/**') }}
+          key: mobileclip2-s2-fp16-ios17-${{ runner.os }}-${{ hashFiles('tools/MobileCLIPConversion/**') }}
 
       - name: Install pinned conversion dependencies
         shell: bash
@@ -77,9 +79,9 @@ jobs:
           set -euo pipefail
           mkdir -p build/build-diagnostics
           image="$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
-          text="$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage"
           prompts="$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
-          if [[ ! -d "$image" || ! -d "$text" || ! -s "$prompts" ]]; then
+          manifest="$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json"
+          if [[ ! -d "$image" || ! -s "$prompts" || ! -s "$manifest" ]]; then
             rm -rf "$CONVERTED_DIR"
             python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
               --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
@@ -89,6 +91,58 @@ jobs:
             echo "Using cached converted model packages" \
               | tee build/build-diagnostics/conversion.log
           fi
+
+      - name: Build diagnostic conversion variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/model-variants
+          variants=("trace float16 iOS17" "trace float16 iOS18" "trace float32 iOS17")
+          for variant in "${variants[@]}"; do
+            read -r method precision target <<< "$variant"
+            identifier="$method-$precision-${target,,}"
+            python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --output "build/model-variants/$identifier" \
+              --export-method "$method" --precision "$precision" --deployment-target "$target"
+            python tools/MobileCLIPConversion/verify_conversion.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --models "build/model-variants/$identifier" \
+              --output "build/model-variants/$identifier/verification.json"
+            python tools/MobileCLIPConversion/inspect_mil_program.py \
+              "build/model-variants/$identifier/MobileCLIP2S2ImageEncoder.mlpackage" \
+              --output "build/model-variants/$identifier"
+          done
+          set +e
+          python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+            --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+            --output build/model-variants/export-float16-ios17 \
+            --export-method export --precision float16 --deployment-target iOS17 \
+            > build/build-diagnostics/torch-export.log 2>&1
+          export_status=$?
+          set -e
+          if [[ "$export_status" == 0 ]]; then
+            python tools/MobileCLIPConversion/verify_conversion.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --models build/model-variants/export-float16-ios17 \
+              --output build/model-variants/export-float16-ios17/verification.json
+            python tools/MobileCLIPConversion/inspect_mil_program.py \
+              build/model-variants/export-float16-ios17/MobileCLIP2S2ImageEncoder.mlpackage \
+              --output build/model-variants/export-float16-ios17
+          fi
+          python - "$export_status" <<'PY'
+          import json, pathlib, sys
+          status = int(sys.argv[1])
+          path = pathlib.Path("build/model-variants/export-float16-ios17-status.json")
+          path.write_text(json.dumps({"identifier":"export-float16-ios17","conversionSucceeded":status == 0,"toolchainSupported":status == 0}, indent=2) + "\n")
+          PY
+
+      - name: Inspect primary MIL program
+        shell: bash
+        run: |
+          python tools/MobileCLIPConversion/inspect_mil_program.py \
+            "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" \
+            --output build/build-diagnostics
 
       - name: Verify Core ML against PyTorch
         shell: bash
@@ -104,15 +158,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/build-diagnostics "$APP_MODELS"
+          rm -rf "$APP_MODELS"/MobileCLIP2S2TextEncoder.mlpackage "$APP_MODELS"/MobileCLIP2S2TextEncoder.mlmodelc
           test -s "$CHECKPOINT_DIR/mobileclip2_s2.pt"
           test -d "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
-          test -d "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage"
           test -s "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
+          test -s "$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json"
+          test -s "$CONVERTED_DIR/MobileCLIP2S2ConversionReport.json"
+          ! find "$CONVERTED_DIR" -iname '*TextEncoder*' -print -quit | grep -q .
           test -s conversion-verification.json
           test "$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])')" = True
           cp -R "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" "$APP_MODELS/"
-          cp -R "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage" "$APP_MODELS/"
           cp "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" "$APP_MODELS/"
+          cp "$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json" "$APP_MODELS/"
+          cp "$CONVERTED_DIR/MobileCLIP2S2ConversionReport.json" "$APP_MODELS/"
           cp tools/MobileCLIPConversion/MODEL_LICENSE.md "$APP_MODELS/MobileCLIP2S2-MODEL-LICENSE.md"
           xcodebuild -version | tee build/build-diagnostics/xcode-version.txt
           xcodebuild -project AI-Image-Classifier.xcodeproj -list -json \
@@ -178,30 +236,52 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
             DEVELOPMENT_TEAM='' \
+            INFOPLIST_KEY_GitCommit="$GITHUB_SHA" \
+            INFOPLIST_KEY_GitBranch="$GITHUB_REF_NAME" \
+            INFOPLIST_KEY_BuildDate="$(date -u +%FT%TZ)" \
+            INFOPLIST_KEY_CoreMLToolsVersion=9.0 \
+            INFOPLIST_KEY_PyTorchVersion=2.8.0 \
             build 2>&1 | tee build/build-diagnostics/xcodebuild.log
+
+      - name: Archive for generic iOS device without signing
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AI-Image-Classifier.xcodeproj \
+            -scheme AI-Image-Classifier \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/AI-Image-Classifier.xcarchive" \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' DEVELOPMENT_TEAM='' \
+            INFOPLIST_KEY_GitCommit="$GITHUB_SHA" INFOPLIST_KEY_GitBranch="$GITHUB_REF_NAME" \
+            INFOPLIST_KEY_BuildDate="$(date -u +%FT%TZ)" INFOPLIST_KEY_CoreMLToolsVersion=9.0 INFOPLIST_KEY_PyTorchVersion=2.8.0 \
+            archive 2>&1 | tee build/build-diagnostics/xcodebuild-archive.log
 
       - name: Package and validate unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
-          products="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
-          apps=()
-          while IFS= read -r path; do apps+=("$path"); done \
-            < <(find "$products" -maxdepth 1 -type d -name '*.app' | sort)
-          (( ${#apps[@]} == 1 ))
-          app="${apps[0]}"
-          for model in MobileCLIP2S2ImageEncoder MobileCLIP2S2TextEncoder; do
-            test -d "$app/$model.mlmodelc"
-            test -n "$(find "$app/$model.mlmodelc" -type f -print -quit)"
-          done
+          app="$PWD/build/AI-Image-Classifier.xcarchive/Products/Applications/AI-Image-Classifier.app"
+          test -d "$app/MobileCLIP2S2ImageEncoder.mlmodelc"
+          test -n "$(find "$app/MobileCLIP2S2ImageEncoder.mlmodelc" -type f -print -quit)"
           test -s "$app/MobileCLIP2S2PromptEmbeddings.json"
+          test -s "$app/MobileCLIP2S2ModelManifest.json"
           test -s "$app/MobileCLIP2S2-MODEL-LICENSE.md"
+          ! find "$app" -iname '*TextEncoder*' -print -quit | grep -q .
+          ! find "$app" -name 'mobileclip2_s2.pt' -print -quit | grep -q .
           rm -rf build/ipa
           mkdir -p build/ipa/Payload
           cp -R "$app" build/ipa/Payload/
           (cd build/ipa && zip -r ../AI-Image-Classifier-unsigned.ipa Payload)
           test -s build/AI-Image-Classifier-unsigned.ipa
           unzip -l build/AI-Image-Classifier-unsigned.ipa | tee build/build-diagnostics/ipa-contents.txt
+          find build/ipa/Payload -maxdepth 5 -type f | sort | tee build/build-diagnostics/payload-files.txt
+          plutil -p "$app/Info.plist" | tee build/build-diagnostics/final-info-plist.txt
+          [[ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" == true ]]
+          [[ "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw "$app/Info.plist")" == true ]]
 
       - name: Record artifact sizes and build summary
         if: always()
@@ -209,7 +289,6 @@ jobs:
         run: |
           set +e
           image_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
-          text_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
           prompt_size=$(stat -f '%z' "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" 2>/dev/null)
           ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa 2>/dev/null)
           model_sha=$(python -c 'import json; print(json.load(open("model_manifest.json"))["checkpointSHA256"])' 2>/dev/null)
@@ -222,7 +301,11 @@ jobs:
             echo "- Model source: https://huggingface.co/apple/MobileCLIP2-S2"
             echo "- Model SHA-256: ${model_sha:-unavailable}"
             echo "- Image encoder bytes: ${image_size:-unavailable}"
-            echo "- Text encoder bytes: ${text_size:-unavailable}"
+            echo "- Text encoder bundled: false"
+            echo "- Precision: float16"
+            echo "- Minimum model deployment target: iOS17"
+            echo "- Export method: torch.jit.trace"
+            echo "- Previous artifact: 374891484 bytes"
             echo "- Prompt assets bytes: ${prompt_size:-unavailable}"
             echo "- IPA bytes: ${ipa_size:-unavailable}"
             echo "- Unit tests: see xcodebuild-tests.log"
@@ -257,6 +340,7 @@ jobs:
             build/build-diagnostics/
             build/model-manifest.json
             build/conversion-verification.json
+            build/model-variants/
             tools/MobileCLIPConversion/MODEL_LICENSE.md
           if-no-files-found: warn
           retention-days: 14

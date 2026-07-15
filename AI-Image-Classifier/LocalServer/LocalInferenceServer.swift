@@ -143,6 +143,15 @@ final class LocalInferenceServer {
         if case .failed(let message) = model.state { lastError = message }
     }
 
+    func retryModelLoad() {
+        modelPreparationTask?.cancel()
+        modelPreparationTask = Task { [weak self] in
+            guard let self else { return }
+            do { try await coordinator.reloadModel() } catch { }
+            await refreshMetrics()
+        }
+    }
+
     private func runServer(lifecycleID: UUID) async {
         await configureRoutesIfNeeded()
         let runTask = Task { try await server.run() }
@@ -181,15 +190,47 @@ final class LocalInferenceServer {
         let coordinator = coordinator
         await server.appendRoute("GET /health") { _ in
             let health = LocalAPIContract.health(from: await coordinator.modelSnapshot())
+            try? await DiagnosticLogService.shared.appendHealth(health)
             return JSONHTTPResponse.make(health, statusCode: health.modelLoaded ? .ok : .serviceUnavailable)
         }
 
         let configuration = configuration
-        let metrics = metrics
-        await server.appendRoute("POST /v1/person-classify") { request in
+        await server.appendRoute("GET /v1/diagnostics/status") { request in
             guard LocalAPIContract.isAuthorized(
                 header: request.headers[.authorization], token: configuration.bearerToken
             ) else {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "unauthorized"), statusCode: .unauthorized
+                )
+            }
+            let model = await coordinator.modelSnapshot()
+            let session = await DiagnosticLogService.shared.snapshot()
+            let state: String
+            switch model.state {
+            case .notLoaded: state = "notLoaded"
+            case .loading: state = "loading"
+            case .ready: state = "ready"
+            case .failed: state = "failed"
+            }
+            let response = DiagnosticsStatusDTO(
+                sessionId: session?.sessionID ?? "not-started", state: state, stage: model.stage,
+                model: LocalServerConfiguration.modelName, precision: "float16", deploymentTarget: "iOS17",
+                selectedComputeUnits: model.selectedComputeUnits, attempts: model.loadAttempts,
+                logFilesAvailable: session != nil
+            )
+            return JSONHTTPResponse.make(response)
+        }
+
+        let metrics = metrics
+        await server.appendRoute("POST /v1/person-classify") { request in
+            let requestID = UUID()
+            let requestStarted = ContinuousClock.now
+            guard LocalAPIContract.isAuthorized(
+                header: request.headers[.authorization], token: configuration.bearerToken
+            ) else {
+                try? await DiagnosticLogService.shared.log(level: "warning", category: "server", event: "requestRejected", details: [
+                    "requestId": requestID.uuidString, "method": "POST", "path": "/v1/person-classify", "authenticated": "false", "statusCode": "401"
+                ])
                 return JSONHTTPResponse.make(
                     ErrorResponseDTO(success: false, error: "unauthorized"), statusCode: .unauthorized
                 )
@@ -228,8 +269,15 @@ final class LocalInferenceServer {
                 )
             }
             do {
-                let batch = try await coordinator.classify(imageData: imageData)
+                let batch = try await coordinator.classify(imageData: imageData, requestID: requestID)
                 await metrics.record(batch: batch)
+                let elapsed = requestStarted.duration(to: .now)
+                let duration = Int(elapsed.components.seconds * 1_000) + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+                try? await DiagnosticLogService.shared.log(level: "info", category: "server", event: "requestCompleted", details: [
+                    "requestId": requestID.uuidString, "method": "POST", "path": "/v1/person-classify",
+                    "contentType": contentType, "bodySizeBytes": String(imageData.count), "authenticated": "true",
+                    "durationMs": String(duration), "statusCode": "200", "peopleDetected": String(batch.people.count)
+                ])
                 return JSONHTTPResponse.make(ClassificationResponseDTO(batch: batch))
             } catch PersonInferenceCoordinator.ServiceError.invalidImage {
                 return JSONHTTPResponse.make(

@@ -31,10 +31,11 @@ actor PersonInferenceCoordinator {
     }
 
     func prepare() async throws { try await mobileCLIPService.loadIfNeeded() }
+    func reloadModel() async throws { try await mobileCLIPService.reload() }
 
     func modelSnapshot() async -> MobileCLIPServiceMetrics { await mobileCLIPService.snapshot() }
 
-    func classify(imageData: Data) async throws -> PersonClassificationBatch {
+    func classify(imageData: Data, requestID: UUID? = nil) async throws -> PersonClassificationBatch {
         guard let image = UIImage(data: imageData), let sourceImage = image.cgImage,
               let cgImage = normalizedImage(sourceImage, orientation: image.imageOrientation.cgImagePropertyOrientation) else {
             throw ServiceError.invalidImage
@@ -61,7 +62,7 @@ actor PersonInferenceCoordinator {
         people.reserveCapacity(crops.count)
         for crop in crops {
             do {
-                people.append(try await mobileCLIPService.classify(crop))
+                people.append(try await mobileCLIPService.classify(crop, requestID: requestID))
             } catch MobileCLIPService.ServiceError.modelUnavailable {
                 throw ServiceError.modelUnavailable
             } catch {

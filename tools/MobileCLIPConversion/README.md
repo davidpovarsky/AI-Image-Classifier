@@ -13,10 +13,15 @@ OpenCLIP `main`.
 
 The converter uses Apple's documented `image_mean=(0,0,0)` and
 `image_std=(1,1,1)` for MobileCLIP2-S2, switches to evaluation mode, folds the
-reparameterizable branches, exports separate FP32 image/text ML Programs, and
-generates category embeddings from every configured prompt. No quantization is
-performed. The verifier runs both frameworks on ten deterministic images and
-all text prompts and rejects insufficient cosine agreement or ranking drift.
+reparameterizable branches, exports a Float16/iOS 17 image ML Program, and
+generates category embeddings directly in PyTorch from every configured prompt.
+The text encoder is never saved or bundled. No quantization is performed. The
+verifier runs both frameworks on ten deterministic images and rejects cosine,
+score, finiteness, or top-category drift outside the acceptance thresholds.
+
+CI also converts trace/Float16/iOS 18 and trace/Float32/iOS 17 diagnostic
+variants. It attempts torch.export/Float16/iOS 17 and records an explicit
+unsupported result when the pinned toolchain cannot convert that path.
 
 `model_manifest.json` is a source template. `download_model.sh` writes the
 actual checkpoint SHA-256 to the repository-root `model_manifest.json` used by

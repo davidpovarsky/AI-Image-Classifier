@@ -15,9 +15,18 @@ struct LocalServerView: View {
             }
             Section("Model readiness") {
                 LabeledContent("Image encoder", value: readiness(server.metricsSnapshot.model.imageEncoderLoaded))
-                LabeledContent("Text encoder", value: readiness(server.metricsSnapshot.model.textEncoderLoaded))
                 LabeledContent("Prompt embeddings", value: readiness(server.metricsSnapshot.model.promptEmbeddingsReady))
+                LabeledContent("Runtime configuration", value: server.metricsSnapshot.model.selectedComputeUnits ?? "Not selected")
+                LabeledContent("Stage", value: server.metricsSnapshot.model.stage)
+                LabeledContent("Smoke test", value: readiness(server.metricsSnapshot.model.smokeTestPassed))
                 LabeledContent("Model load", value: duration(server.metricsSnapshot.model.loadDurationMs))
+            }
+            if !server.metricsSnapshot.model.loadAttempts.isEmpty {
+                Section("Load attempts") {
+                    ForEach(server.metricsSnapshot.model.loadAttempts) { attempt in
+                        LabeledContent(attempt.computeUnits, value: attempt.succeeded ? "Success — \(attempt.durationMs) ms" : "Failed — \(attempt.errorDomain ?? "unknown") \(attempt.errorCode.map(String.init) ?? "")")
+                    }
+                }
             }
             Section("Requests") {
                 LabeledContent("Processed images", value: String(server.metricsSnapshot.totalProcessed))
@@ -35,9 +44,14 @@ struct LocalServerView: View {
                 Button(server.isRunning || server.starting ? "Stop" : "Start") {
                     server.isRunning || server.starting ? server.stop() : server.start()
                 }
+                Button("Retry Model Load") { server.retryModelLoad() }
+                NavigationLink("View Diagnostics") { DiagnosticsView() }
             }
             if let lastError = server.lastError {
-                Section("Last Error") { Text(lastError).foregroundStyle(.red) }
+                Section("Last Error") {
+                    Text(lastError).foregroundStyle(.red)
+                    Button("Copy Error") { UIPasteboard.general.string = lastError }
+                }
             }
         }
         .navigationTitle("Local Server")

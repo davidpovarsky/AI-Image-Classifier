@@ -41,7 +41,8 @@ Apple's official Core ML download currently contains first-generation
 MobileCLIP models, not MobileCLIP2-S2. This repository therefore downloads the
 official `mobileclip2_s2.pt` checkpoint during CI, loads Apple's architecture,
 calls `eval()` and `reparameterize_model()`, and converts separate image and
-text encoders without quantization. It does not commit the PyTorch checkpoint.
+image encoder as Float16 without quantization and precomputes prompt embeddings;
+the text encoder and PyTorch checkpoint are not bundled or committed.
 
 ```bash
 python -m pip install -r tools/MobileCLIPConversion/requirements.txt
