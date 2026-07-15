@@ -75,6 +75,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p build/build-diagnostics
           image="$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
           text="$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage"
           prompts="$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
@@ -82,7 +83,11 @@ jobs:
             rm -rf "$CONVERTED_DIR"
             python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
               --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
-              --output "$CONVERTED_DIR"
+              --output "$CONVERTED_DIR" 2>&1 \
+              | tee build/build-diagnostics/conversion.log
+          else
+            echo "Using cached converted model packages" \
+              | tee build/build-diagnostics/conversion.log
           fi
 
       - name: Verify Core ML against PyTorch
