@@ -99,6 +99,10 @@ def main() -> None:
     text_wrapper = TextEncoder(model).eval()
     image_example = torch.rand(1, 3, IMAGE_SIZE, IMAGE_SIZE)
     text_example = tokenizer(["a photo of a person"]).to(torch.int32)
+    # PyTorch 2.8's inference fast path emits _native_multi_head_attention,
+    # which coremltools 9.0 does not translate. The decomposed path is
+    # numerically equivalent and is verified against the source model below.
+    torch.backends.mha.set_fastpath_enabled(False)
     with torch.inference_mode():
         traced_image = torch.jit.trace(image_wrapper, image_example)
         traced_text = torch.jit.trace(text_wrapper, text_example)
