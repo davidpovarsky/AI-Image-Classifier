@@ -31,9 +31,16 @@ Carthage/Build/
 # Temp
 *.tmp
 *.swp
+__pycache__/
+*.py[cod]
 
 # CoreML compiled models
 *.mlmodelc
+.model-cache/
+/AI-Image-Classifier/Models/MobileCLIP2S2ImageEncoder.mlpackage/
+/AI-Image-Classifier/Models/MobileCLIP2S2TextEncoder.mlpackage/
+/AI-Image-Classifier/Models/MobileCLIP2S2PromptEmbeddings.json
+/AI-Image-Classifier/Models/MobileCLIP2S2-MODEL-LICENSE.md
 
 # IDE
 .idea/

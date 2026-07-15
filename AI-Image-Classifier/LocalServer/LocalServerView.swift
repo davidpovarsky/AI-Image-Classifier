@@ -11,36 +11,31 @@ struct LocalServerView: View {
                 LabeledContent("Status", value: statusText)
                 LabeledContent("Address", value: LocalServerConfiguration.host)
                 LabeledContent("Port", value: String(server.configuration.port))
-                LabeledContent("Model", value: "NudeNet 320n")
+                LabeledContent("Model", value: LocalServerConfiguration.modelName)
             }
-
-            Section("Model performance") {
+            Section("Model readiness") {
+                LabeledContent("Image encoder", value: readiness(server.metricsSnapshot.model.imageEncoderLoaded))
+                LabeledContent("Text encoder", value: readiness(server.metricsSnapshot.model.textEncoderLoaded))
+                LabeledContent("Prompt embeddings", value: readiness(server.metricsSnapshot.model.promptEmbeddingsReady))
                 LabeledContent("Model load", value: duration(server.metricsSnapshot.model.loadDurationMs))
-                LabeledContent("Warm-up", value: duration(server.metricsSnapshot.model.warmUpDurationMs))
-                LabeledContent("Last inference", value: duration(server.metricsSnapshot.model.lastInferenceDurationMs))
             }
-
             Section("Requests") {
-                LabeledContent("Total processed", value: String(server.metricsSnapshot.totalProcessed))
-                LabeledContent("Total detections", value: String(server.metricsSnapshot.totalDetections))
-                LabeledContent("Last detection count", value: String(server.metricsSnapshot.lastDetectionCount))
-                LabeledContent("Last top detection", value: server.metricsSnapshot.lastTopDetection ?? "None")
+                LabeledContent("Processed images", value: String(server.metricsSnapshot.totalProcessed))
+                LabeledContent("Detected people", value: String(server.metricsSnapshot.totalDetectedPeople))
+                LabeledContent("Average latency", value: duration(server.metricsSnapshot.averageLatencyMs))
+                LabeledContent("Last latency", value: duration(server.metricsSnapshot.lastRequestLatencyMs))
+                LabeledContent("Last result", value: server.metricsSnapshot.lastResultSummary ?? "None")
             }
-
             Section("Authentication") {
-                Text(server.token)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
+                Text(server.token).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                 Button("Copy URL") { UIPasteboard.general.url = server.localURL }
                 Button("Copy Token") { UIPasteboard.general.string = server.token }
             }
-
             Section("Controls") {
                 Button(server.isRunning || server.starting ? "Stop" : "Start") {
                     server.isRunning || server.starting ? server.stop() : server.start()
                 }
             }
-
             if let lastError = server.lastError {
                 Section("Last Error") { Text(lastError).foregroundStyle(.red) }
             }
@@ -60,15 +55,13 @@ struct LocalServerView: View {
 
     private var statusText: String {
         switch server.metricsSnapshot.model.state {
-        case .notLoaded: server.state == .starting ? "Starting server..." : "Loading model..."
-        case .loading: "Loading model..."
-        case .warming: "Warming model..."
+        case .notLoaded: server.state == .starting ? "Starting server…" : "Loading model…"
+        case .loading: "Loading model…"
         case .ready: "Ready"
         case .failed(let message): "Failed: \(message)"
         }
     }
 
-    private func duration(_ milliseconds: Int?) -> String {
-        milliseconds.map { "\($0) ms" } ?? "—"
-    }
+    private func readiness(_ ready: Bool) -> String { ready ? "Ready" : "Not ready" }
+    private func duration(_ milliseconds: Int?) -> String { milliseconds.map { "\($0) ms" } ?? "—" }
 }

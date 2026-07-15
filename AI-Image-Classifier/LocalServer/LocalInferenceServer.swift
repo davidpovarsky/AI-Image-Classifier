@@ -5,24 +5,33 @@ import Observation
 import OSLog
 
 nonisolated struct LocalInferenceMetricsSnapshot: Equatable, Sendable {
-    var model = NudeNetServiceMetrics()
+    var model = MobileCLIPServiceMetrics()
     var totalProcessed = 0
-    var totalDetections = 0
-    var lastDetectionCount = 0
-    var lastTopDetection: String?
+    var totalDetectedPeople = 0
+    var totalLatencyMs = 0
+    var lastRequestLatencyMs: Int?
+    var lastResultSummary: String?
+
+    var averageLatencyMs: Int? {
+        totalProcessed == 0 ? nil : totalLatencyMs / totalProcessed
+    }
 }
 
 actor LocalInferenceMetrics {
     private var value = LocalInferenceMetricsSnapshot()
 
-    func updateModel(_ model: NudeNetServiceMetrics) { value.model = model }
+    func updateModel(_ model: MobileCLIPServiceMetrics) { value.model = model }
 
-    func record(detections: [NudeDetection], inferenceDurationMs: Int) {
+    func record(batch: PersonClassificationBatch) {
         value.totalProcessed += 1
-        value.totalDetections += detections.count
-        value.lastDetectionCount = detections.count
-        value.lastTopDetection = detections.first?.label
-        value.model.lastInferenceDurationMs = inferenceDurationMs
+        value.totalDetectedPeople += batch.people.count
+        value.totalLatencyMs += batch.inferenceDurationMs
+        value.lastRequestLatencyMs = batch.inferenceDurationMs
+        let classes = Dictionary(grouping: batch.people, by: \.predictedClass)
+            .map { "\($0.key.rawValue): \($0.value.count)" }
+            .sorted()
+            .joined(separator: ", ")
+        value.lastResultSummary = classes.isEmpty ? "No people detected" : classes
     }
 
     func snapshot() -> LocalInferenceMetricsSnapshot { value }
@@ -31,12 +40,7 @@ actor LocalInferenceMetrics {
 @MainActor
 @Observable
 final class LocalInferenceServer {
-    enum State: Equatable {
-        case stopped
-        case starting
-        case running
-        case failed
-    }
+    enum State: Equatable { case stopped, starting, running, failed }
 
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "AI-Image-Classifier",
@@ -51,8 +55,8 @@ final class LocalInferenceServer {
     let modelName = LocalServerConfiguration.modelName
 
     private let server: HTTPServer
-    private let detector: NudeNetService
-    private let metrics: LocalInferenceMetrics
+    private let coordinator: PersonInferenceCoordinator
+    private let metrics = LocalInferenceMetrics()
     private var lifecycleTask: Task<Void, Never>?
     private var modelPreparationTask: Task<Void, Never>?
     private var lifecycleID: UUID?
@@ -60,18 +64,18 @@ final class LocalInferenceServer {
 
     init(
         configuration: LocalServerConfiguration = .makeDefault(),
-        detector: NudeNetService = .shared
+        coordinator: PersonInferenceCoordinator = .shared
     ) {
         self.configuration = configuration
-        self.detector = detector
-        metrics = LocalInferenceMetrics()
-        let address: sockaddr_in
+        self.coordinator = coordinator
         do {
-            address = try sockaddr_in.inet(ip4: LocalServerConfiguration.host, port: configuration.port)
+            server = HTTPServer(address: try sockaddr_in.inet(
+                ip4: LocalServerConfiguration.host,
+                port: configuration.port
+            ))
         } catch {
             preconditionFailure("The built-in loopback address is invalid.")
         }
-        server = HTTPServer(address: address)
     }
 
     var stopped: Bool { state == .stopped }
@@ -133,10 +137,10 @@ final class LocalInferenceServer {
     }
 
     func refreshMetrics() async {
-        let modelSnapshot = await detector.snapshot()
-        await metrics.updateModel(modelSnapshot)
+        let model = await coordinator.modelSnapshot()
+        await metrics.updateModel(model)
         metricsSnapshot = await metrics.snapshot()
-        if case .failed(let message) = modelSnapshot.state { lastError = message }
+        if case .failed(let message) = model.state { lastError = message }
     }
 
     private func runServer(lifecycleID: UUID) async {
@@ -147,7 +151,7 @@ final class LocalInferenceServer {
             try Task.checkCancellation()
             guard self.lifecycleID == lifecycleID else { runTask.cancel(); return }
             state = .running
-            Self.logger.info("Local inference server is listening")
+            Self.logger.info("Local person-classification server is listening")
             modelPreparationTask = Task { [weak self] in await self?.prepareModel() }
             try await runTask.value
             if !Task.isCancelled, self.lifecycleID == lifecycleID { state = .stopped }
@@ -167,41 +171,33 @@ final class LocalInferenceServer {
     }
 
     private func prepareModel() async {
-        do {
-            try await detector.loadIfNeeded()
-            await refreshMetrics()
-            try await detector.warmUp()
-            await refreshMetrics()
-        } catch {
-            await refreshMetrics()
-        }
+        do { try await coordinator.prepare() } catch { }
+        await refreshMetrics()
     }
 
     private func configureRoutesIfNeeded() async {
         guard !routesConfigured else { return }
         routesConfigured = true
-        let detector = detector
+        let coordinator = coordinator
         await server.appendRoute("GET /health") { _ in
-            let health = LocalAPIContract.health(from: await detector.snapshot())
+            let health = LocalAPIContract.health(from: await coordinator.modelSnapshot())
             return JSONHTTPResponse.make(health, statusCode: health.modelLoaded ? .ok : .serviceUnavailable)
         }
 
         let configuration = configuration
         let metrics = metrics
-        await server.appendRoute("POST /v1/classify") { request in
+        await server.appendRoute("POST /v1/person-classify") { request in
             guard LocalAPIContract.isAuthorized(
-                header: request.headers[.authorization],
-                token: configuration.bearerToken
+                header: request.headers[.authorization], token: configuration.bearerToken
             ) else {
                 return JSONHTTPResponse.make(
-                    ErrorResponseDTO(success: false, error: "unauthorized"),
-                    statusCode: .unauthorized
+                    ErrorResponseDTO(success: false, error: "unauthorized"), statusCode: .unauthorized
                 )
             }
             let contentType = request.headers[.contentType]?
                 .split(separator: ";", maxSplits: 1).first?
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let supported: Set<String> = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]
+            let supported: Set<String> = ["image/jpeg", "image/png", "image/heic", "image/heif"]
             guard let contentType, supported.contains(contentType) else {
                 return JSONHTTPResponse.make(
                     ErrorResponseDTO(success: false, error: "unsupported_media_type"),
@@ -211,46 +207,35 @@ final class LocalInferenceServer {
             if let length = request.headers[.contentLength],
                let count = Int(length), count > configuration.maximumImageBytes {
                 return JSONHTTPResponse.make(
-                    ErrorResponseDTO(success: false, error: "payload_too_large"),
-                    statusCode: .payloadTooLarge
+                    ErrorResponseDTO(success: false, error: "payload_too_large"), statusCode: .payloadTooLarge
                 )
             }
             let imageData: Data
             do { imageData = try await request.bodyData } catch {
                 return JSONHTTPResponse.make(
-                    ErrorResponseDTO(success: false, error: "invalid_image"),
-                    statusCode: .badRequest
+                    ErrorResponseDTO(success: false, error: "invalid_image"), statusCode: .badRequest
                 )
             }
             guard imageData.count <= configuration.maximumImageBytes else {
                 return JSONHTTPResponse.make(
-                    ErrorResponseDTO(success: false, error: "payload_too_large"),
-                    statusCode: .payloadTooLarge
+                    ErrorResponseDTO(success: false, error: "payload_too_large"), statusCode: .payloadTooLarge
                 )
             }
-            guard (await detector.snapshot()).state == .ready else {
+            guard (await coordinator.modelSnapshot()).state == .ready else {
                 return JSONHTTPResponse.make(
                     ErrorResponseDTO(success: false, error: "model_unavailable"),
                     statusCode: .serviceUnavailable
                 )
             }
-            let queued = ContinuousClock.now
             do {
-                let batch = try await detector.detect(imageData: imageData)
-                let waitMs = Self.milliseconds(since: queued) - batch.inferenceDurationMs
-                Logger(subsystem: Bundle.main.bundleIdentifier ?? "AI-Image-Classifier", category: "inference")
-                    .debug("Queue wait \(max(waitMs, 0), privacy: .public) ms; inference \(batch.inferenceDurationMs, privacy: .public) ms")
-                await metrics.record(
-                    detections: batch.detections,
-                    inferenceDurationMs: batch.inferenceDurationMs
-                )
+                let batch = try await coordinator.classify(imageData: imageData)
+                await metrics.record(batch: batch)
                 return JSONHTTPResponse.make(ClassificationResponseDTO(batch: batch))
-            } catch NudeNetService.ServiceError.invalidImage {
+            } catch PersonInferenceCoordinator.ServiceError.invalidImage {
                 return JSONHTTPResponse.make(
-                    ErrorResponseDTO(success: false, error: "invalid_image"),
-                    statusCode: .badRequest
+                    ErrorResponseDTO(success: false, error: "invalid_image"), statusCode: .badRequest
                 )
-            } catch NudeNetService.ServiceError.modelUnavailable {
+            } catch PersonInferenceCoordinator.ServiceError.modelUnavailable {
                 return JSONHTTPResponse.make(
                     ErrorResponseDTO(success: false, error: "model_unavailable"),
                     statusCode: .serviceUnavailable
@@ -262,11 +247,5 @@ final class LocalInferenceServer {
                 )
             }
         }
-    }
-
-    nonisolated private static func milliseconds(since start: ContinuousClock.Instant) -> Int {
-        let duration = start.duration(to: .now)
-        return Int(duration.components.seconds * 1_000)
-            + Int(duration.components.attoseconds / 1_000_000_000_000_000)
     }
 }

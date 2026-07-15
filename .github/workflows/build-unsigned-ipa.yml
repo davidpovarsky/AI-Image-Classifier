@@ -7,89 +7,25 @@ on:
       - main
       - feature/local-coreml-http-server
       - feature/raw-nudenet-inference-api
+      - feature/mobileclip2-person-classifier
+  pull_request:
+    branches:
+      - main
+      - feature/mobileclip2-person-classifier
 
 permissions:
   contents: read
 
 jobs:
-  validate-model:
+  build-test-package:
     runs-on: macos-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - name: Validate committed NudeNet model package
-        run: python3 tools/model_conversion/validate_committed_model.py
-
-  unit-tests:
-    needs: validate-model
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-      - name: Run unit tests
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p build
-
-          xcodebuild \
-            -project AI-Image-Classifier.xcodeproj \
-            -scheme AI-Image-Classifier \
-            -showdestinations \
-            2>&1 | tee build/xcodebuild-destinations.log
-
-          device_id="$(
-            xcrun simctl list devices available -j |
-            ruby -rjson -e '
-              data = JSON.parse(STDIN.read)
-
-              device = data.fetch("devices")
-                .values
-                .flatten
-                .find do |candidate|
-                  candidate["isAvailable"] == true &&
-                  candidate["name"].to_s.start_with?("iPhone")
-                end
-
-              abort "No available iPhone simulator was found" unless device
-              puts device.fetch("udid")
-            '
-          )"
-
-          echo "Selected simulator: $device_id"
-
-          xcrun simctl boot "$device_id" 2>/dev/null || true
-          xcrun simctl bootstatus "$device_id" -b
-
-          xcodebuild \
-            -project AI-Image-Classifier.xcodeproj \
-            -scheme AI-Image-Classifier \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=$device_id" \
-            -derivedDataPath "$PWD/build/TestDerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            test 2>&1 | tee build/xcodebuild-tests.log
-      - name: Upload unit test diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xcodebuild-tests-log
-          path: |
-            build/xcodebuild-destinations.log
-            build/xcodebuild-tests.log
-          if-no-files-found: warn
-          retention-days: 14
-
-  build:
-    needs:
-      - validate-model
-      - unit-tests
-    runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
+    env:
+      APP_MODELS: AI-Image-Classifier/Models
+      CHECKPOINT_DIR: .model-cache/mobileclip2-s2
+      CONVERTED_DIR: .model-cache/coreml-mobileclip2-s2
+      MOBILECLIP_COMMIT: aecfb5453d022e9deff12f81a150ea8f35194baa
+      OPEN_CLIP_COMMIT: 54c9754a94baacac5b2d9b1c76318078d48912af
 
     steps:
       - name: Check out repository
@@ -100,72 +36,134 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Set up conversion Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: tools/MobileCLIPConversion/requirements.txt
 
-      - name: Detect project and scheme
+      - name: Cache official checkpoint and verified Core ML conversion
+        uses: actions/cache@v5
+        with:
+          path: |
+            .model-cache/mobileclip2-s2
+            .model-cache/coreml-mobileclip2-s2
+          key: mobileclip2-s2-fp32-${{ runner.os }}-${{ hashFiles('tools/MobileCLIPConversion/**') }}
+
+      - name: Install pinned conversion dependencies
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/MobileCLIPConversion/requirements.txt
 
-          workspaces=()
-          while IFS= read -r path; do
-            workspaces+=("$path")
-          done < <(find . -maxdepth 2 -type d -name '*.xcworkspace' -not -path './*.xcodeproj/*' | sort)
+          git clone https://github.com/apple/ml-mobileclip.git "$RUNNER_TEMP/ml-mobileclip"
+          git -C "$RUNNER_TEMP/ml-mobileclip" checkout --detach "$MOBILECLIP_COMMIT"
+          git clone https://github.com/mlfoundations/open_clip.git "$RUNNER_TEMP/open_clip"
+          git -C "$RUNNER_TEMP/open_clip" checkout --detach "$OPEN_CLIP_COMMIT"
+          git -C "$RUNNER_TEMP/open_clip" apply "$RUNNER_TEMP/ml-mobileclip/mobileclip2/open_clip_inference_only.patch"
+          cp -R "$RUNNER_TEMP/ml-mobileclip/mobileclip2/." "$RUNNER_TEMP/open_clip/src/open_clip/"
+          python -m pip install -e "$RUNNER_TEMP/open_clip"
+          echo "PYTHONPATH=$RUNNER_TEMP/ml-mobileclip:$RUNNER_TEMP/open_clip/src" >> "$GITHUB_ENV"
 
-          projects=()
-          while IFS= read -r path; do
-            projects+=("$path")
-          done < <(find . -maxdepth 2 -type d -name '*.xcodeproj' | sort)
+      - name: Download and checksum Apple's official MobileCLIP2-S2 checkpoint
+        shell: bash
+        run: tools/MobileCLIPConversion/download_model.sh "$CHECKPOINT_DIR"
 
-          if (( ${#workspaces[@]} == 1 )); then
-            container_flag='-workspace'
-            container_path="${workspaces[0]#./}"
-          elif (( ${#workspaces[@]} == 0 && ${#projects[@]} == 1 )); then
-            container_flag='-project'
-            container_path="${projects[0]#./}"
-          else
-            echo "Expected exactly one workspace, or exactly one project when no workspace exists." >&2
-            printf 'Workspaces: %s\n' "${workspaces[*]:-none}" >&2
-            printf 'Projects: %s\n' "${projects[*]:-none}" >&2
-            exit 1
+      - name: Convert MobileCLIP2-S2 to Core ML
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
+          text="$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage"
+          prompts="$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
+          if [[ ! -d "$image" || ! -d "$text" || ! -s "$prompts" ]]; then
+            rm -rf "$CONVERTED_DIR"
+            python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+              --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+              --output "$CONVERTED_DIR"
           fi
 
-          xcodebuild "$container_flag" "$container_path" -list -json > build/xcodebuild-list.json
-          scheme=$(ruby -rjson -e '
-            data = JSON.parse(File.read(ARGV[0]))
-            container = data["workspace"] || data["project"]
-            schemes = container && container["schemes"]
-            abort "No shared schemes found" unless schemes&.length == 1
-            puts schemes.first
-          ' build/xcodebuild-list.json)
-
-          {
-            echo "CONTAINER_FLAG=$container_flag"
-            echo "CONTAINER_PATH=$container_path"
-            echo "SCHEME=$scheme"
-          } >> "$GITHUB_ENV"
-
-          echo "Container: $container_flag $container_path"
-          echo "Scheme: $scheme"
-
-      - name: Resolve Swift package dependencies
+      - name: Verify Core ML against PyTorch
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild \
-            "$CONTAINER_FLAG" "$CONTAINER_PATH" \
-            -scheme "$SCHEME" \
-            -resolvePackageDependencies
+          python tools/MobileCLIPConversion/verify_conversion.py \
+            --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
+            --models "$CONVERTED_DIR" \
+            --output conversion-verification.json
 
-      - name: Build for generic iOS device
+      - name: Validate all build inputs early
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/build-diagnostics "$APP_MODELS"
+          test -s "$CHECKPOINT_DIR/mobileclip2_s2.pt"
+          test -d "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
+          test -d "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage"
+          test -s "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
+          test -s conversion-verification.json
+          test "$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])')" = True
+          cp -R "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" "$APP_MODELS/"
+          cp -R "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage" "$APP_MODELS/"
+          cp "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" "$APP_MODELS/"
+          cp tools/MobileCLIPConversion/MODEL_LICENSE.md "$APP_MODELS/MobileCLIP2S2-MODEL-LICENSE.md"
+          xcodebuild -version | tee build/build-diagnostics/xcode-version.txt
+          xcodebuild -project AI-Image-Classifier.xcodeproj -list -json \
+            | tee build/build-diagnostics/xcodebuild-list.json
+          python - <<'PY'
+          import json
+          data = json.load(open("build/build-diagnostics/xcodebuild-list.json"))
+          schemes = data["project"]["schemes"]
+          assert "AI-Image-Classifier" in schemes, schemes
+          PY
+
+      - name: Resolve Swift packages
         shell: bash
         run: |
           set -o pipefail
           xcodebuild \
-            "$CONTAINER_FLAG" "$CONTAINER_PATH" \
-            -scheme "$SCHEME" \
+            -project AI-Image-Classifier.xcodeproj \
+            -scheme AI-Image-Classifier \
+            -resolvePackageDependencies 2>&1 \
+            | tee build/build-diagnostics/package-resolution.log
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project AI-Image-Classifier.xcodeproj -scheme AI-Image-Classifier \
+            -showdestinations 2>&1 | tee build/build-diagnostics/xcodebuild-destinations.log
+          device_id="$(
+            xcrun simctl list devices available -j | ruby -rjson -e '
+              data = JSON.parse(STDIN.read)
+              device = data.fetch("devices").values.flatten.find do |candidate|
+                candidate["isAvailable"] == true && candidate["name"].to_s.start_with?("iPhone")
+              end
+              abort "No available iPhone simulator was found" unless device
+              puts device.fetch("udid")
+            '
+          )"
+          xcrun simctl boot "$device_id" 2>/dev/null || true
+          xcrun simctl bootstatus "$device_id" -b
+          set -o pipefail
+          xcodebuild \
+            -project AI-Image-Classifier.xcodeproj \
+            -scheme AI-Image-Classifier \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -derivedDataPath "$PWD/build/TestDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee build/build-diagnostics/xcodebuild-tests.log
+
+      - name: Build for generic iOS device without signing
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AI-Image-Classifier.xcodeproj \
+            -scheme AI-Image-Classifier \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -175,55 +173,69 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY='' \
             DEVELOPMENT_TEAM='' \
-            build 2>&1 | tee build/xcodebuild.log
+            build 2>&1 | tee build/build-diagnostics/xcodebuild.log
 
-      - name: Package unsigned IPA
+      - name: Package and validate unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
           products="$PWD/build/DerivedData/Build/Products/Release-iphoneos"
           apps=()
-          while IFS= read -r path; do
-            apps+=("$path")
-          done < <(find "$products" -maxdepth 1 -type d -name '*.app' | sort)
-
-          if (( ${#apps[@]} != 1 )); then
-            echo "Expected exactly one application product; found ${#apps[@]}." >&2
-            printf '%s\n' "${apps[@]:-}" >&2
-            exit 1
-          fi
-
-          model_path="${apps[0]}/NudeNet320n.mlmodelc"
-          test -d "$model_path"
-          test -n "$(find "$model_path" -type f -print -quit)"
-          echo "Compiled Core ML model: $model_path"
-
+          while IFS= read -r path; do apps+=("$path"); done \
+            < <(find "$products" -maxdepth 1 -type d -name '*.app' | sort)
+          (( ${#apps[@]} == 1 ))
+          app="${apps[0]}"
+          for model in MobileCLIP2S2ImageEncoder MobileCLIP2S2TextEncoder; do
+            test -d "$app/$model.mlmodelc"
+            test -n "$(find "$app/$model.mlmodelc" -type f -print -quit)"
+          done
+          test -s "$app/MobileCLIP2S2PromptEmbeddings.json"
+          test -s "$app/MobileCLIP2S2-MODEL-LICENSE.md"
           rm -rf build/ipa
           mkdir -p build/ipa/Payload
-          cp -R "${apps[0]}" build/ipa/Payload/
-          (
-            cd build/ipa
-            zip -r ../AI-Image-Classifier-unsigned.ipa Payload
-          )
+          cp -R "$app" build/ipa/Payload/
+          (cd build/ipa && zip -r ../AI-Image-Classifier-unsigned.ipa Payload)
+          test -s build/AI-Image-Classifier-unsigned.ipa
+          unzip -l build/AI-Image-Classifier-unsigned.ipa | tee build/build-diagnostics/ipa-contents.txt
 
-          test -f build/AI-Image-Classifier-unsigned.ipa
-          ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa)
-          echo "IPA_SIZE_BYTES=$ipa_size"
-          unzip -l build/AI-Image-Classifier-unsigned.ipa | tee build/ipa-contents.txt
+      - name: Record artifact sizes and build summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          image_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
+          text_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2TextEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
+          prompt_size=$(stat -f '%z' "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" 2>/dev/null)
+          ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa 2>/dev/null)
+          model_sha=$(python -c 'import json; print(json.load(open("model_manifest.json"))["checkpointSHA256"])' 2>/dev/null)
+          verification=$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])' 2>/dev/null)
+          {
+            echo '## MobileCLIP2-S2 unsigned IPA build'
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Branch: $GITHUB_REF_NAME"
+            echo "- Xcode: $(xcodebuild -version | tr '\n' ' ')"
+            echo "- Model source: https://huggingface.co/apple/MobileCLIP2-S2"
+            echo "- Model SHA-256: ${model_sha:-unavailable}"
+            echo "- Image encoder bytes: ${image_size:-unavailable}"
+            echo "- Text encoder bytes: ${text_size:-unavailable}"
+            echo "- Prompt assets bytes: ${prompt_size:-unavailable}"
+            echo "- IPA bytes: ${ipa_size:-unavailable}"
+            echo "- Unit tests: see xcodebuild-tests.log"
+            echo "- Conversion verification: ${verification:-unavailable}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cp model_manifest.json build/model-manifest.json 2>/dev/null || true
+          cp conversion-verification.json build/conversion-verification.json 2>/dev/null || true
 
-      - name: Upload unsigned IPA
-        uses: actions/upload-artifact@v7
-        with:
-          name: AI-Image-Classifier-unsigned-ipa
-          path: build/AI-Image-Classifier-unsigned.ipa
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload xcodebuild log
+      - name: Upload unsigned IPA, model manifest, verification, and diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xcodebuild-log
-          path: build/xcodebuild.log
+          name: AI-Image-Classifier-MobileCLIP2-S2-unsigned
+          path: |
+            build/AI-Image-Classifier-unsigned.ipa
+            build/build-diagnostics/
+            build/model-manifest.json
+            build/conversion-verification.json
+            tools/MobileCLIPConversion/MODEL_LICENSE.md
           if-no-files-found: warn
           retention-days: 14

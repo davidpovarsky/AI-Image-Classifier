@@ -2,8 +2,9 @@ import Foundation
 
 nonisolated struct LocalServerConfiguration: Sendable {
     static let host = "127.0.0.1"
-    static let modelName = "NudeNet320n"
-    static let serverVersion = 3
+    static let modelName = "MobileCLIP2-S2"
+    static let serverVersion = 4
+    static let inferenceMode: InferenceMode = .mobileCLIPPersonClassifier
 
     let port: UInt16
     let maximumImageBytes: Int

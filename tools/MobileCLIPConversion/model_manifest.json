@@ -1,0 +1,8 @@
+{
+  "model": "MobileCLIP2-S2",
+  "source": "https://huggingface.co/apple/MobileCLIP2-S2",
+  "checkpointFile": "mobileclip2_s2.pt",
+  "checkpointSHA256": null,
+  "license": "Apple Machine Learning Research Model License Agreement",
+  "note": "The workflow replaces the null checksum with the downloaded checkpoint SHA-256."
+}

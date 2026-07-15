@@ -17,27 +17,37 @@ health_code="$(curl -sS -o "$work/health.json" -w '%{http_code}' "$BASE_URL/heal
 test "$health_code" = 200
 jq -e '
   .status == "ok" and
-  .serverVersion == 3 and
-  .model == "NudeNet320n" and
+  .serverVersion == 4 and
+  .model == "MobileCLIP2-S2" and
   .modelLoaded == true and
-  (has("policyVersion") | not)
+  .imageEncoderLoaded == true and
+  .textEncoderLoaded == true and
+  .promptEmbeddingsReady == true
 ' "$work/health.json" >/dev/null
 
 unauthorized_code="$(curl -sS -o "$work/unauthorized.json" -w '%{http_code}' \
-  -H 'Content-Type: image/jpeg' --data-binary @"$work/safe.jpg" "$BASE_URL/v1/classify")"
+  -H 'Content-Type: image/jpeg' --data-binary @"$work/safe.jpg" "$BASE_URL/v1/person-classify")"
 test "$unauthorized_code" = 401
 
 for fixture in safe.jpg safe.png; do
   case "$fixture" in *.jpg) media=image/jpeg ;; *.png) media=image/png ;; esac
   code="$(curl -sS -o "$work/$fixture.json" -w '%{http_code}' \
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: $media" \
-    --data-binary @"$work/$fixture" "$BASE_URL/v1/classify")"
+    --data-binary @"$work/$fixture" "$BASE_URL/v1/person-classify")"
   test "$code" = 200
   jq -e '
     .success == true and
-    .model == "NudeNet320n" and
+    .model == "MobileCLIP2-S2" and
+    .serverVersion == 4 and
     (.durationMs | type == "number") and
-    (.detections | type == "array") and
+    (.people | type == "array") and
+    (.peopleCount == (.people | length)) and
+    (.people | all(
+      (.box.x >= 0 and .box.x <= 1) and
+      (.box.y >= 0 and .box.y <= 1) and
+      ((.scores.woman + .scores.man + .scores.uncertain + .scores.notPerson) > 0.999) and
+      ((.scores.woman + .scores.man + .scores.uncertain + .scores.notPerson) < 1.001)
+    )) and
     (has("allowed") | not) and
     (has("risk") | not) and
     (has("confidence") | not) and
@@ -48,8 +58,8 @@ done
 
 malformed_code="$(printf 'not an image' | curl -sS -o "$work/malformed.json" -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: image/jpeg' \
-  --data-binary @- "$BASE_URL/v1/classify")"
+  --data-binary @- "$BASE_URL/v1/person-classify")"
 test "$malformed_code" = 400
 jq -e '.success == false and .error == "invalid_image"' "$work/malformed.json" >/dev/null
 
-echo "Local NudeNet server contract passed for health, auth, JPEG, PNG, malformed input, and schema."
+echo "Local MobileCLIP2-S2 server contract passed for health, auth, JPEG, PNG, malformed input, and schema."

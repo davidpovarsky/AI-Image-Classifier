@@ -1,122 +1,104 @@
 # AI Image Classifier for iOS
 
-This SwiftUI app performs on-device nudity object detection with NudeNet 320n,
-an Ultralytics YOLOv8n detector exported as a 320×320 Float16 Core ML ML
-Program. It returns labeled detections, confidence scores, normalized bounding
-boxes, and a configurable allow/block policy. Speech and camera demonstrations
-from the upstream project remain available.
+This SwiftUI app runs a local, bearer-token-protected person-classification
+server. Vision finds each person, the app expands and crops every detection,
+and MobileCLIP2-S2 performs zero-shot visual classification with four prompt
+ensembles: `woman`, `man`, `uncertain`, and `notPerson`.
 
-Inference is local. Images submitted through the UI or loopback HTTP server are
-held in memory only: the app does not persist, upload, or log image bytes.
+This system performs visual zero-shot classification.
+It does not determine biological sex or gender identity.
+Its labels describe the visual category selected by the model prompts.
+
+The inference server returns raw model scores.
+Blocking policy is intentionally left to the client.
+
+## Architecture
+
+1. `VNDetectHumanRectanglesRequest` detects full-body rectangles. If it finds
+   none, an optional `VNDetectFaceRectanglesRequest` fallback supplies clearly
+   marked `faceFallback` regions.
+2. `PersonCropService` converts Vision's lower-left coordinates once, applies
+   12% padding, clamps to the image, and crops the oriented `CGImage`.
+3. A `MobileCLIPService` actor retains both Core ML encoders and serialized
+   inference. Category embeddings are produced from multiple prompts, cached
+   as a generated build asset, and validated against the prompt configuration.
+4. The local HTTP layer returns every detected person, Vision confidence,
+   normalized top-left bounding box, predicted visual class, and all four
+   softmax scores. It never returns `allowed`, `blocked`, or risk policy.
+
+NudeNet remains in the repository as an explicit legacy subsystem for possible
+future nudity detection. It is not the default mode and its output is never
+mixed with MobileCLIP scores.
 
 ## Model provenance and conversion
 
-- Source: [official NudeNet `320n.pt`](https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/320n.pt)
-- Weight release: `v3.4-weights`
-- SHA-256: `1d25e219d536dcd6994651020d3c7cba642d13990e6eef934ed7a8ba650fb582`
-- App artifact: `AI-Image-Classifier/Models/NudeNet320n.mlpackage`
-- Conversion command: `python tools/model_conversion/convert_nudenet_320n.py`
-- Verification command: `python tools/model_conversion/verify_model.py`
+- Official implementation: [apple/ml-mobileclip](https://github.com/apple/ml-mobileclip)
+- Official checkpoint: [apple/MobileCLIP2-S2](https://huggingface.co/apple/MobileCLIP2-S2)
+- Human detection: [VNDetectHumanRectanglesRequest](https://developer.apple.com/documentation/vision/vndetecthumanrectanglesrequest)
+- Model terms: [Apple ML Research Model License](https://github.com/apple/ml-mobileclip/blob/main/LICENSE_MODELS)
 
-The reproducible macOS/Python 3.11 workflow is documented in
-`tools/model_conversion/README.md`. Tested pins are Ultralytics 8.4.95,
-coremltools 9.0, PyTorch 2.13.0, torchvision 0.28.0, Pillow 12.3.0, and NumPy
-2.3.5. These are conversion-only tools and are not iOS runtime dependencies.
+Apple's official Core ML download currently contains first-generation
+MobileCLIP models, not MobileCLIP2-S2. This repository therefore downloads the
+official `mobileclip2_s2.pt` checkpoint during CI, loads Apple's architecture,
+calls `eval()` and `reparameterize_model()`, and converts separate image and
+text encoders without quantization. It does not commit the PyTorch checkpoint.
 
-### Canonical labels
+```bash
+python -m pip install -r tools/MobileCLIPConversion/requirements.txt
+tools/MobileCLIPConversion/download_model.sh .model-cache/mobileclip2-s2
+python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+  --checkpoint .model-cache/mobileclip2-s2/mobileclip2_s2.pt
+python tools/MobileCLIPConversion/verify_conversion.py \
+  --checkpoint .model-cache/mobileclip2-s2/mobileclip2_s2.pt
+```
 
-| ID | Label | ID | Label |
-|---:|---|---:|---|
-| 0 | FEMALE_GENITALIA_COVERED | 9 | FEET_COVERED |
-| 1 | FACE_FEMALE | 10 | ARMPITS_COVERED |
-| 2 | BUTTOCKS_EXPOSED | 11 | ARMPITS_EXPOSED |
-| 3 | FEMALE_BREAST_EXPOSED | 12 | FACE_MALE |
-| 4 | FEMALE_GENITALIA_EXPOSED | 13 | BELLY_EXPOSED |
-| 5 | MALE_BREAST_EXPOSED | 14 | MALE_GENITALIA_EXPOSED |
-| 6 | ANUS_EXPOSED | 15 | ANUS_COVERED |
-| 7 | FEET_EXPOSED | 16 | FEMALE_BREAST_COVERED |
-| 8 | BELLY_COVERED | 17 | BUTTOCKS_COVERED |
-
-## Default policy
-
-The standard profile blocks exposed female breast (0.45), female genitalia
-(0.35), male genitalia (0.35), anus (0.35), and buttocks (0.50). Strict mode
-can additionally block exposed male breast (0.75), belly (0.90), and armpits
-(0.95). Faces, covered classes, and feet never block on their own. Policy lives
-separately from inference in `NudityFilterPolicy.swift`, so thresholds can be
-changed without retraining the model.
+The complete macOS setup and reproducibility notes are in
+`tools/MobileCLIPConversion/README.md`. Conversion verification compares at
+least ten deterministic image samples plus every configured text prompt,
+checks embedding cosine similarity and class ranking, and fails CI on drift.
 
 ## Local HTTP API
 
-The app exposes a bearer-token-protected server on `127.0.0.1:8765`. Send raw
-encoded image bytes, never multipart or Base64:
+The app listens on `127.0.0.1:8765`. The first use creates a stable UUID bearer
+token in `UserDefaults`; copy it from the Local Server screen. Send raw JPEG,
+PNG, HEIC, or HEIF bytes (never multipart or Base64):
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: image/jpeg' \
-  --data-binary @safe.jpg \
-  http://127.0.0.1:8765/v1/classify
+  --data-binary @photo.jpg \
+  http://127.0.0.1:8765/v1/person-classify
 ```
 
-```json
-{
-  "success": true,
-  "allowed": false,
-  "risk": "nudity",
-  "confidence": 0.93,
-  "triggeredClass": "FEMALE_BREAST_EXPOSED",
-  "durationMs": 18,
-  "model": "NudeNet320n",
-  "detections": [{
-    "classId": 3,
-    "label": "FEMALE_BREAST_EXPOSED",
-    "confidence": 0.93,
-    "box": {"x": 0.12, "y": 0.28, "width": 0.24, "height": 0.31}
-  }],
-  "predictions": [{"label": "FEMALE_BREAST_EXPOSED", "confidence": 0.93}]
-}
-```
+See `LOCAL_SERVER.md` for complete request, response, readiness, and error
+contracts.
 
-`predictions` is deprecated compatibility output. See `LOCAL_SERVER.md` for the
-complete contract, errors, lifecycle limits, and unsigned IPA instructions.
+## Privacy and limitations
 
-## Accuracy and validation limits
+All image inference is on-device. Image bytes and crops stay in memory and are
+not persisted, logged, uploaded, sent to Hugging Face, Apple, OpenAI, external
+telemetry, or any other server. Models are downloaded only by the build job and
+packaged into the app.
 
-Detection and policy decisions can produce false positives and false negatives.
-They must not be treated as age verification, consent determination, or a
-substitute for human review. Real NSFW validation material is intentionally not
-committed. Validate privately on a physical device using lawfully obtained test
-material and do not record or redistribute it.
-
-### iPad M3 benchmark
-
-No physical iPad M3 was available during CI verification, so values are not
-invented.
-
-| Metric | Result |
-|---|---|
-| Cold model load | Pending physical iPad M3 measurement |
-| Warm-up | Pending physical iPad M3 measurement |
-| First inference | Pending physical iPad M3 measurement |
-| Median warm inference | Pending physical iPad M3 measurement |
-| p95 warm inference | Pending physical iPad M3 measurement |
-| Peak memory | Pending physical iPad M3 measurement |
-
-## Licensing
-
-The NudeNet repository and `v3.4-weights` tag contain AGPL-3.0 license files,
-but NudeNet's PyPI metadata and `setup.py` declare MIT; the release does not
-state an unambiguous separate license for the weights. Ultralytics is AGPL-3.0
-and is used only during conversion. coremltools and the other conversion tools
-carry their respective BSD-style or bundled licenses. Resolve the NudeNet and
-weights discrepancy with the copyright holder or legal counsel before
-distribution. This inventory is not legal advice.
+MobileCLIP2-S2 was not trained as a dedicated woman/man classifier. False
+positives and negatives are expected. Illustrations, children, small or partial
+people, side views, obscured faces, and dense groups can be especially hard.
+`uncertain` is a valid result, scores are not absolute truth, and prompt wording
+materially affects zero-shot output. Human-rectangle detection can also miss a
+person. Do not use this system to infer gender identity or biological sex.
 
 ## Build
 
 The project is `AI-Image-Classifier.xcodeproj`, scheme
-`AI-Image-Classifier`, target iOS 26.2. GitHub Actions validates the committed
-model, runs unit tests, performs a generic physical-device Release build with
-signing disabled, confirms the compiled model is in the `.app`, and packages an
-unsigned IPA. An unsigned IPA is not directly installable without a separate
-signing process.
+`AI-Image-Classifier`, targets iOS/iPadOS 26.2, and uses the latest stable Xcode
+selected by GitHub Actions. The workflow downloads and converts the model,
+verifies Core ML against PyTorch, runs unit tests, builds for a generic iOS
+device without signing, validates the bundled model assets, and uploads
+`AI-Image-Classifier-MobileCLIP2-S2-unsigned` containing the unsigned IPA,
+model manifest, conversion report, and build diagnostics. An unsigned IPA
+requires a separate signing process before installation.
+
+The Apple model terms limit the model to research purposes and require the
+license and attribution on redistribution. Review
+`tools/MobileCLIPConversion/MODEL_LICENSE.md` before using or distributing the
+generated model. This is not legal advice.
