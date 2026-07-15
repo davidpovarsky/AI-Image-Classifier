@@ -302,6 +302,9 @@ jobs:
           test -s "$app/MobileCLIP2S2-MODEL-LICENSE.md"
           ! find "$app" -iname '*TextEncoder*' -print -quit | grep -q .
           ! find "$app" -name 'mobileclip2_s2.pt' -print -quit | grep -q .
+          if ! plutil -replace UIFileSharingEnabled -bool YES "$app/Info.plist"; then
+            plutil -insert UIFileSharingEnabled -bool YES "$app/Info.plist"
+          fi
           rm -rf build/ipa
           mkdir -p build/ipa/Payload
           cp -R "$app" build/ipa/Payload/
@@ -310,8 +313,13 @@ jobs:
           unzip -l build/AI-Image-Classifier-unsigned.ipa | tee build/build-diagnostics/ipa-contents.txt
           find build/ipa/Payload -maxdepth 5 -type f | sort | tee build/build-diagnostics/payload-files.txt
           plutil -p "$app/Info.plist" | tee build/build-diagnostics/final-info-plist.txt
-          [[ "$(plutil -extract UIFileSharingEnabled raw "$app/Info.plist")" == true ]]
-          [[ "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw "$app/Info.plist")" == true ]]
+          python - "$app/Info.plist" <<'PY'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as stream:
+              info = plistlib.load(stream)
+          assert info.get("UIFileSharingEnabled") is True, info.get("UIFileSharingEnabled")
+          assert info.get("LSSupportsOpeningDocumentsInPlace") is True, info.get("LSSupportsOpeningDocumentsInPlace")
+          PY
 
       - name: Record artifact sizes and build summary
         if: always()
