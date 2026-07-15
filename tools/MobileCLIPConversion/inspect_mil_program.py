@@ -44,7 +44,7 @@ def main() -> None:
                     dynamic_operation_shapes.append(f"{function_name}:{operation.type}")
     inputs = {item.name: shape(item) or ["image"] for item in spec.description.input}
     outputs = {item.name: shape(item) for item in spec.description.output}
-    dynamic = any("dynamic" in value for values in [*inputs.values(), *outputs.values()] for value in values)
+    dynamic = any(value == "dynamic" for values in [*inputs.values(), *outputs.values()] for value in values)
     suspicious = {
         "dynamicReshapeOrTranspose": [name for name in dynamic_operation_shapes if name.endswith(("reshape", "transpose"))],
         "complexGatherOrScatter": [name for name in operations if "gather" in name or "scatter" in name],
