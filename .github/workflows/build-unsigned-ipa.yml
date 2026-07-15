@@ -227,7 +227,23 @@ jobs:
             echo "- IPA bytes: ${ipa_size:-unavailable}"
             echo "- Unit tests: see xcodebuild-tests.log"
             echo "- Conversion verification: ${verification:-unavailable}"
+            if [[ -s build/build-diagnostics/conversion.log && ! -s conversion-verification.json ]]; then
+              echo
+              echo '<details><summary>Conversion failure tail</summary>'
+              echo
+              echo '```text'
+              tail -n 30 build/build-diagnostics/conversion.log
+              echo '```'
+              echo '</details>'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -s build/build-diagnostics/conversion.log && ! -s conversion-verification.json ]]; then
+            conversion_error=$(tail -n 15 build/build-diagnostics/conversion.log)
+            conversion_error=${conversion_error//'%'/'%25'}
+            conversion_error=${conversion_error//$'\r'/'%0D'}
+            conversion_error=${conversion_error//$'\n'/'%0A'}
+            echo "::error title=MobileCLIP2-S2 conversion failed::$conversion_error"
+          fi
           cp model_manifest.json build/model-manifest.json 2>/dev/null || true
           cp conversion-verification.json build/conversion-verification.json 2>/dev/null || true
 
