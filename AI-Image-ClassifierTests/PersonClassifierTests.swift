@@ -128,7 +128,7 @@ final class PersonClassifierTests: XCTestCase {
     }
 
     func testDiagnosticSessionCreatesFilesWritesJSONLAndExports() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let service = DiagnosticLogService(documentsURL: root)
         try await service.startSession()
@@ -141,13 +141,13 @@ final class PersonClassifierTests: XCTestCase {
         let snapshot = try XCTUnwrap(optionalSnapshot)
         XCTAssertEqual(snapshot.eventCount, 21)
         for name in ["runtime.log", "events.jsonl", "device.json", "app.json", "model-manifest.json", "model-load-attempts.json", "health-snapshots.jsonl", "inference-events.jsonl", "summary.json"] {
-            XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.folderURL.appending(path: name).path()))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: snapshot.folderURL.appendingPathComponent(name).path(percentEncoded: false)))
         }
-        let lines = try String(contentsOf: snapshot.folderURL.appending(path: "events.jsonl"), encoding: .utf8)
+        let lines = try String(contentsOf: snapshot.folderURL.appendingPathComponent("events.jsonl"), encoding: .utf8)
             .split(separator: "\n")
         XCTAssertEqual(lines.count, 21)
         let export = try await service.exportLatestSession()
-        XCTAssertTrue(FileManager.default.fileExists(atPath: export.path()))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: export.path(percentEncoded: false)))
     }
 
     func testUIImageOrientationMapping() {

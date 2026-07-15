@@ -37,22 +37,24 @@ actor DiagnosticLogService {
         sessionID = UUID().uuidString
         let safeDate = startedAt.replacingOccurrences(of: ":", with: "-")
         let root = diagnosticsRoot
-        try fileManager.createDirectory(at: root.appending(path: "Current"), withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: root.appending(path: "Exports"), withIntermediateDirectories: true)
-        let folder = root.appending(path: "Sessions/\(safeDate)_\(sessionID)")
+        try fileManager.createDirectory(at: root.appendingPathComponent("Current", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: root.appendingPathComponent("Exports", isDirectory: true), withIntermediateDirectories: true)
+        let folder = root
+            .appendingPathComponent("Sessions", isDirectory: true)
+            .appendingPathComponent("\(safeDate)_\(sessionID)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         sessionURL = folder
         for name in ["runtime.log", "events.jsonl", "health-snapshots.jsonl", "inference-events.jsonl"] {
-            try Data().write(to: folder.appending(path: name), options: .atomic)
+            try Data().write(to: folder.appendingPathComponent(name), options: .atomic)
         }
-        try Data("[]\n".utf8).write(to: folder.appending(path: "model-load-attempts.json"), options: .atomic)
-        try Data("{}\n".utf8).write(to: folder.appending(path: "summary.json"), options: .atomic)
+        try Data("[]\n".utf8).write(to: folder.appendingPathComponent("model-load-attempts.json"), options: .atomic)
+        try Data("{}\n".utf8).write(to: folder.appendingPathComponent("summary.json"), options: .atomic)
         try writeJSON(await Self.deviceMetadata(), named: "device.json")
         try writeJSON(Self.appMetadata(), named: "app.json")
         if let manifest = Bundle.main.url(forResource: "MobileCLIP2S2ModelManifest", withExtension: "json") {
-            try fileManager.copyItem(at: manifest, to: folder.appending(path: "model-manifest.json"))
+            try fileManager.copyItem(at: manifest, to: folder.appendingPathComponent("model-manifest.json"))
         } else {
-            try Data("{}\n".utf8).write(to: folder.appending(path: "model-manifest.json"), options: .atomic)
+            try Data("{}\n".utf8).write(to: folder.appendingPathComponent("model-manifest.json"), options: .atomic)
         }
         try await log(level: "info", category: "lifecycle", event: "applicationLaunched")
         try rotateIfNeeded()
@@ -68,10 +70,10 @@ actor DiagnosticLogService {
             "event": event, "details": redacted
         ]
         let json = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) + Data([0x0A])
-        try append(json, to: sessionURL.appending(path: "events.jsonl"))
+        try append(json, to: sessionURL.appendingPathComponent("events.jsonl"))
         let suffix = redacted.isEmpty ? "" : " \(redacted.sorted { $0.key < $1.key })"
         let line = "[\(timestamp)] [\(level.uppercased())] \(event)\(suffix)\n"
-        try append(Data(line.utf8), to: sessionURL.appending(path: "runtime.log"))
+        try append(Data(line.utf8), to: sessionURL.appendingPathComponent("runtime.log"))
         eventCount += 1
         lastEvent = event
         if level == "error" { lastError = redacted["description"] ?? event }
@@ -87,7 +89,7 @@ actor DiagnosticLogService {
 
     func snapshot() -> DiagnosticSessionSnapshot? {
         guard let sessionURL else { return nil }
-        let size = (try? fileManager.attributesOfItem(atPath: sessionURL.appending(path: "runtime.log").path())[.size] as? NSNumber)?.intValue ?? 0
+        let size = (try? fileManager.attributesOfItem(atPath: sessionURL.appendingPathComponent("runtime.log").path(percentEncoded: false))[.size] as? NSNumber)?.intValue ?? 0
         return DiagnosticSessionSnapshot(
             sessionID: sessionID, startedAt: startedAt, folderURL: sessionURL,
             runtimeLogBytes: size, eventCount: eventCount, lastEvent: lastEvent, lastError: lastError
@@ -96,7 +98,9 @@ actor DiagnosticLogService {
 
     func exportLatestSession() throws -> URL {
         guard let sessionURL else { throw CocoaError(.fileNoSuchFile) }
-        let export = diagnosticsRoot.appending(path: "Exports/MobileCLIP2-Diagnostics-\(startedAt.replacingOccurrences(of: ":", with: "-")).diagnostics")
+        let export = diagnosticsRoot
+            .appendingPathComponent("Exports", isDirectory: true)
+            .appendingPathComponent("MobileCLIP2-Diagnostics-\(startedAt.replacingOccurrences(of: ":", with: "-")).diagnostics", isDirectory: true)
         try? fileManager.removeItem(at: export)
         try fileManager.copyItem(at: sessionURL, to: export)
         return export
@@ -112,12 +116,12 @@ actor DiagnosticLogService {
         guard let sessionURL else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(value).write(to: sessionURL.appending(path: name), options: .atomic)
+        try encoder.encode(value).write(to: sessionURL.appendingPathComponent(name), options: .atomic)
     }
 
     private func appendJSONLine<T: Encodable>(_ value: T, named name: String) throws {
         guard let sessionURL else { return }
-        try append(try JSONEncoder().encode(value) + Data([0x0A]), to: sessionURL.appending(path: name))
+        try append(try JSONEncoder().encode(value) + Data([0x0A]), to: sessionURL.appendingPathComponent(name))
     }
 
     private func append(_ data: Data, to url: URL) throws {
@@ -130,8 +134,8 @@ actor DiagnosticLogService {
 
     private func rotateRuntimeLogIfNeeded() throws {
         guard let sessionURL else { return }
-        let url = sessionURL.appending(path: "runtime.log")
-        let size = (try fileManager.attributesOfItem(atPath: url.path())[.size] as? NSNumber)?.intValue ?? 0
+        let url = sessionURL.appendingPathComponent("runtime.log")
+        let size = (try fileManager.attributesOfItem(atPath: url.path(percentEncoded: false))[.size] as? NSNumber)?.intValue ?? 0
         guard size > 10 * 1_024 * 1_024 else { return }
         let data = try Data(contentsOf: url)
         try data.suffix(5 * 1_024 * 1_024).write(to: url, options: .atomic)
@@ -140,7 +144,7 @@ actor DiagnosticLogService {
     private func rotateIfNeeded() throws { try rotate(keepNewest: 3, maximumSessions: 20, maximumBytes: 100 * 1_024 * 1_024) }
 
     private func rotate(keepNewest: Int, maximumSessions: Int, maximumBytes: Int) throws {
-        let sessions = diagnosticsRoot.appending(path: "Sessions")
+        let sessions = diagnosticsRoot.appendingPathComponent("Sessions", isDirectory: true)
         let urls = try fileManager.contentsOfDirectory(at: sessions, includingPropertiesForKeys: [.contentModificationDateKey, .totalFileAllocatedSizeKey])
             .filter { $0 != sessionURL }.sorted { $0.lastPathComponent > $1.lastPathComponent }
         var total = urls.reduce(0) { $0 + Self.directorySize($1, fileManager: fileManager) }
