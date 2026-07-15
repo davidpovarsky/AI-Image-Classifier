@@ -104,7 +104,9 @@ actor DiagnosticLogService {
 
     func deleteOldLogs() throws { try rotate(keepNewest: 3, maximumSessions: 3, maximumBytes: 100 * 1_024 * 1_024) }
 
-    private var diagnosticsRoot: URL { documentsURL.appending(path: "AI-Image-Classifier Diagnostics", directoryHint: .isDirectory) }
+    private var diagnosticsRoot: URL {
+        documentsURL.appendingPathComponent("AI-Image-Classifier Diagnostics", isDirectory: true)
+    }
 
     private func writeJSON<T: Encodable>(_ value: T, named name: String) throws {
         guard let sessionURL else { return }
@@ -187,13 +189,17 @@ actor DiagnosticLogService {
     @MainActor private static func deviceMetadata() -> [String: String] {
         let device = UIDevice.current
         let process = ProcessInfo.processInfo
+        let screenScale = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.scale }
+            .first
+            .map { String(describing: $0) } ?? "unavailable"
         return [
             "deviceName": device.userInterfaceIdiom == .pad ? "iPad" : "iPhone",
             "systemName": device.systemName, "systemVersion": device.systemVersion,
             "modelIdentifier": modelIdentifier(),
             "processorCount": String(process.processorCount), "activeProcessorCount": String(process.activeProcessorCount),
             "physicalMemoryBytes": String(process.physicalMemory), "lowPowerModeEnabled": String(process.isLowPowerModeEnabled),
-            "screenScale": String(describing: UIScreen.main.scale), "locale": Locale.current.identifier,
+            "screenScale": screenScale, "locale": Locale.current.identifier,
             "timeZone": TimeZone.current.identifier, "thermalState": String(process.thermalState.rawValue)
         ]
     }
