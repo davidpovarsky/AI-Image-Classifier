@@ -113,12 +113,14 @@ jobs:
       - name: Build diagnostic conversion variants
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           mkdir -p build/model-variants
           variants=("trace float16 iOS17" "trace float16 iOS18" "trace float32 iOS17")
           for variant in "${variants[@]}"; do
             read -r method precision target <<< "$variant"
-            identifier="$method-$precision-${target,,}"
+            target_identifier="$(printf '%s' "$target" | tr '[:upper:]' '[:lower:]')"
+            identifier="$method-$precision-$target_identifier"
             set +e
             python tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
               --checkpoint "$CHECKPOINT_DIR/mobileclip2_s2.pt" \
@@ -319,7 +321,7 @@ jobs:
           image_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
           prompt_size=$(stat -f '%z' "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" 2>/dev/null)
           ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa 2>/dev/null)
-          model_sha=$(python -c 'import json; print(json.load(open("model_manifest.json"))["checkpointSHA256"])' 2>/dev/null)
+          model_sha=$(python -c 'import json, os; print(json.load(open(os.environ["CONVERTED_DIR"] + "/MobileCLIP2S2ModelManifest.json"))["checkpointSHA256"])' 2>/dev/null)
           verification=$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])' 2>/dev/null)
           {
             echo '## MobileCLIP2-S2 unsigned IPA build'
@@ -373,7 +375,7 @@ jobs:
             verification_error=$(tr '\n' ' ' < conversion-verification.json)
             echo "::error title=MobileCLIP2-S2 verification failed::$verification_error"
           fi
-          cp model_manifest.json build/model-manifest.json 2>/dev/null || true
+          cp "$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json" build/model-manifest.json 2>/dev/null || true
           cp conversion-verification.json build/conversion-verification.json 2>/dev/null || true
 
       - name: Upload unsigned IPA, model manifest, verification, and diagnostics
