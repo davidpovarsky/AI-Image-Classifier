@@ -95,9 +95,11 @@ jobs:
       - name: Inspect primary MIL program
         shell: bash
         run: |
+          set -o pipefail
           python tools/MobileCLIPConversion/inspect_mil_program.py \
             "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" \
-            --output build/build-diagnostics
+            --output build/build-diagnostics 2>&1 \
+            | tee build/build-diagnostics/mil-inspection.log
 
       - name: Verify Core ML against PyTorch
         shell: bash
@@ -359,6 +361,13 @@ jobs:
             conversion_error=${conversion_error//$'\r'/'%0D'}
             conversion_error=${conversion_error//$'\n'/'%0A'}
             echo "::error title=MobileCLIP2-S2 conversion failed::$conversion_error"
+          fi
+          if [[ -s build/build-diagnostics/mil-inspection.log && ! -s build/build-diagnostics/MobileCLIP2S2MILInspection.json ]]; then
+            mil_error=$(tail -n 20 build/build-diagnostics/mil-inspection.log)
+            mil_error=${mil_error//'%'/'%25'}
+            mil_error=${mil_error//$'\r'/'%0D'}
+            mil_error=${mil_error//$'\n'/'%0A'}
+            echo "::error title=MobileCLIP2-S2 MIL inspection failed::$mil_error"
           fi
           if [[ -s conversion-verification.json && "$verification" != True ]]; then
             verification_error=$(tr '\n' ' ' < conversion-verification.json)

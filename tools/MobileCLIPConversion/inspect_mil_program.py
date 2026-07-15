@@ -25,7 +25,13 @@ def main() -> None:
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("."))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    spec = ct.utils.load_spec(str(args.model))
+    spec_path = args.model
+    if spec_path.is_dir():
+        candidates = sorted(spec_path.rglob("*.mlmodel"))
+        if len(candidates) != 1:
+            raise SystemExit(f"Expected one model protobuf in {spec_path}, found {len(candidates)}")
+        spec_path = candidates[0]
+    spec = ct.utils.load_spec(str(spec_path))
     operations: collections.Counter[str] = collections.Counter()
     dynamic_operation_shapes: list[str] = []
     functions = getattr(spec.mlProgram, "functions", {})
@@ -45,7 +51,8 @@ def main() -> None:
         "dynamicMatmulOrAttention": [name for name in dynamic_operation_shapes if "matmul" in name or "attention" in name],
     }
     result = {
-        "model": args.model.name, "specificationVersion": spec.specificationVersion,
+        "model": args.model.name, "specPath": str(spec_path.relative_to(args.model) if args.model.is_dir() else spec_path.name),
+        "specificationVersion": spec.specificationVersion,
         "deploymentTarget": "iOS17" if spec.specificationVersion <= 8 else "requires inspection",
         "functionCount": len(functions), "inputs": inputs, "outputs": outputs,
         "operationCounts": dict(sorted(operations.items())),
