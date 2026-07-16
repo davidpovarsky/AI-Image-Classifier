@@ -92,7 +92,7 @@ actor MobileCLIPService {
                     let model = try MLModel(contentsOf: modelURL, configuration: modelConfiguration)
                     metrics.stage = "smokeTest"
                     try? await diagnostics.log(level: "info", category: "modelLoad", event: "smokeTestStarted", details: ["computeUnits": name])
-                    try await smokeTest(model)
+                    try smokeTest(model)
                     let attempt = Self.attempt(url: modelURL, units: name, started: attemptStarted, error: nil)
                     metrics.loadAttempts.append(attempt)
                     imageEncoder = model
@@ -149,7 +149,7 @@ actor MobileCLIPService {
         let provider = try MLDictionaryFeatureProvider(dictionary: [
             inputName: MLFeatureValue(pixelBuffer: pixelBuffer)
         ])
-        let output = try await imageEncoder.prediction(from: provider)
+        let output = try imageEncoder.prediction(from: provider)
         guard let feature = output.featureNames.lazy.compactMap({ output.featureValue(for: $0) })
             .first(where: { $0.type == .multiArray }),
               let multiArray = feature.multiArrayValue,
@@ -211,13 +211,13 @@ actor MobileCLIPService {
         )
     }
 
-    private func smokeTest(_ model: MLModel) async throws {
+    private func smokeTest(_ model: MLModel) throws {
         guard let inputName = model.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image })?.key else {
             throw ServiceError.unsupportedModelOutput
         }
         let buffer = try makeBlankPixelBuffer()
         let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: MLFeatureValue(pixelBuffer: buffer)])
-        let output = try await model.prediction(from: provider)
+        let output = try model.prediction(from: provider)
         guard let array = output.featureNames.lazy.compactMap({ output.featureValue(for: $0)?.multiArrayValue }).first else {
             throw ServiceError.unsupportedModelOutput
         }
