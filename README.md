@@ -105,7 +105,7 @@ person. Do not use this system to infer gender identity or biological sex.
 ## Build
 
 The project is `AI-Image-Classifier.xcodeproj`, scheme
-`AI-Image-Classifier`, targets iOS/iPadOS 26.2, and uses the latest stable Xcode
+`AI-Image-Classifier`, targets iOS/iPadOS 26.5, and uses the latest stable Xcode
 selected by GitHub Actions. The workflow downloads and converts the model,
 verifies Core ML against PyTorch, runs unit tests, builds for a generic iOS
 device without signing, validates the bundled model assets, and uploads

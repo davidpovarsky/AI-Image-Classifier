@@ -190,7 +190,7 @@ final class LocalInferenceServer {
         routesConfigured = true
         let coordinator = coordinator
         let imageSafetyPipeline = imageSafetyPipeline
-        await server.appendRoute("GET /health") { _ in
+        await server.appendRoute("GET /health") { (_: HTTPRequest) in
             let readiness = await imageSafetyPipeline.readiness()
             let health = LocalAPIContract.health(from: readiness.mobileCLIP, nudeNet: readiness.nudeNet)
             try? await DiagnosticLogService.shared.appendHealth(health)
@@ -198,7 +198,7 @@ final class LocalInferenceServer {
         }
 
         let configuration = configuration
-        await server.appendRoute("GET /v1/diagnostics/status") { request in
+        await server.appendRoute("GET /v1/diagnostics/status") { (request: HTTPRequest) in
             guard LocalAPIContract.isAuthorized(
                 header: request.headers[.authorization], token: configuration.bearerToken
             ) else {
@@ -221,7 +221,7 @@ final class LocalInferenceServer {
             })
             let response = DiagnosticsStatusDTO(
                 sessionId: session?.sessionID ?? "not-started", state: state, stage: model.stage,
-                model: LocalServerConfiguration.modelName, precision: "float16", deploymentTarget: "iOS26.2",
+                model: LocalServerConfiguration.modelName, precision: "float16", deploymentTarget: "iOS26.5",
                 selectedComputeUnits: model.selectedComputeUnits, attempts: model.loadAttempts,
                 logFilesAvailable: session != nil,
                 imageSafetyPipeline: ImageSafetyDiagnosticsStatusDTO(
@@ -234,7 +234,7 @@ final class LocalInferenceServer {
         }
 
         let metrics = metrics
-        await server.appendRoute("POST /v1/image-safety-classify") { request in
+        await server.appendRoute("POST /v1/image-safety-classify") { (request: HTTPRequest) in
             let requestID = UUID()
             guard LocalAPIContract.isAuthorized(
                 header: request.headers[.authorization], token: configuration.bearerToken
@@ -300,7 +300,7 @@ final class LocalInferenceServer {
             }
         }
 
-        await server.appendRoute("POST /v1/person-classify") { request in
+        await server.appendRoute("POST /v1/person-classify") { (request: HTTPRequest) in
             let requestID = UUID()
             let requestStarted = ContinuousClock.now
             guard LocalAPIContract.isAuthorized(
