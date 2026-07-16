@@ -1,7 +1,7 @@
 import XCTest
 @testable import AI_Image_Classifier
 
-final class PersonClassifierTests: XCTestCase {
+nonisolated final class PersonClassifierTests: XCTestCase {
     func testVisionCoordinateConversionInvertsYAxisExactlyOnce() {
         let vision = CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
         let topLeft = PersonCropService.topLeftBox(fromVisionBox: vision)
