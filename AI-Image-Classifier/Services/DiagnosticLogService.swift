@@ -44,11 +44,15 @@ actor DiagnosticLogService {
             .appendingPathComponent("\(safeDate)_\(sessionID)", isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         sessionURL = folder
-        for name in ["runtime.log", "events.jsonl", "health-snapshots.jsonl", "inference-events.jsonl"] {
+        for name in [
+            "runtime.log", "events.jsonl", "health-snapshots.jsonl", "inference-events.jsonl",
+            "image-safety-events.jsonl", "image-safety-module-errors.jsonl"
+        ] {
             try Data().write(to: folder.appendingPathComponent(name), options: .atomic)
         }
         try Data("[]\n".utf8).write(to: folder.appendingPathComponent("model-load-attempts.json"), options: .atomic)
         try Data("{}\n".utf8).write(to: folder.appendingPathComponent("summary.json"), options: .atomic)
+        try Data("{}\n".utf8).write(to: folder.appendingPathComponent("image-safety-summary.json"), options: .atomic)
         try writeJSON(await Self.deviceMetadata(), named: "device.json")
         try writeJSON(Self.appMetadata(), named: "app.json")
         if let manifest = Bundle.main.url(forResource: "MobileCLIP2S2ModelManifest", withExtension: "json") {
@@ -86,6 +90,14 @@ actor DiagnosticLogService {
 
     func appendHealth<T: Encodable>(_ value: T) throws { try appendJSONLine(value, named: "health-snapshots.jsonl") }
     func appendInference<T: Encodable>(_ value: T) throws { try appendJSONLine(value, named: "inference-events.jsonl") }
+
+    func appendImageSafety(_ response: ImageSafetyResponse) throws {
+        try appendJSONLine(response, named: "image-safety-events.jsonl")
+        try writeJSON(response.summary, named: "image-safety-summary.json")
+        for error in response.errors {
+            try appendJSONLine(error, named: "image-safety-module-errors.jsonl")
+        }
+    }
 
     func snapshot() -> DiagnosticSessionSnapshot? {
         guard let sessionURL else { return nil }

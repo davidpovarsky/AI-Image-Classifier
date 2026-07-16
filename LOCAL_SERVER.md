@@ -22,7 +22,7 @@ configuration, and startup smoke test are ready:
 ```json
 {
   "status": "ok",
-  "serverVersion": 5,
+  "serverVersion": 6,
   "model": "MobileCLIP2-S2",
   "modelLoaded": true,
   "imageEncoderLoaded": true,
@@ -31,6 +31,18 @@ configuration, and startup smoke test are ready:
   "selectedComputeUnits": "cpuAndGPU",
   "modelPrecision": "float16",
   "humanDetector": "VNDetectHumanRectanglesRequest",
+  "nudeNet": {
+    "bundled": true,
+    "loaded": true,
+    "modelName": "NudeNet320n",
+    "computeUnits": "all",
+    "labelsCount": 18
+  },
+  "imageSafetyPipeline": {
+    "available": true,
+    "pipelineVersion": 1,
+    "endpoint": "/v1/image-safety-classify"
+  },
   "error": null
 }
 ```
@@ -46,7 +58,7 @@ Send raw JPEG, PNG, HEIC, or HEIF data with the matching `Content-Type`.
 {
   "success": true,
   "model": "MobileCLIP2-S2",
-  "serverVersion": 5,
+    "serverVersion": 6,
   "durationMs": 83,
   "imageWidth": 1920,
   "imageHeight": 1080,
@@ -77,3 +89,10 @@ Errors are 400 `invalid_image`, 401 `unauthorized`, 413
 iOS may suspend an ordinary foreground app. No unsupported background mode was
 added, so keep the app active while using the server. The server exposes only
 raw model observations and scores; it does not expose or apply NudeNet policy.
+
+## `POST /v1/image-safety-classify`
+
+This endpoint preserves the person endpoint and adds modular full-image and
+person-crop NudeNet evidence, coordinate mapping, duplicate merging, timings,
+and per-module partial failures. See `docs/image-safety-api.md` for the complete
+contract. The server returns evidence only; the client owns blocking policy.

@@ -19,6 +19,8 @@ nonisolated struct PersonCrop: @unchecked Sendable {
     let id: UUID
     let image: CGImage
     let sourceBoundingBox: CGRect
+    let expandedBoundingBox: CGRect
+    let pixelRect: CGRect
     let detectionConfidence: Float
     let detectionSource: DetectionSource
 }

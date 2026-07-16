@@ -74,7 +74,7 @@ final class PersonClassifierTests: XCTestCase {
         let data = try JSONEncoder().encode(response)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["model"] as? String, "MobileCLIP2-S2")
-        XCTAssertEqual(object["serverVersion"] as? Int, 5)
+        XCTAssertEqual(object["serverVersion"] as? Int, 6)
         XCTAssertEqual(object["peopleCount"] as? Int, 1)
         XCTAssertNil(object["allowed"])
         XCTAssertNil(object["blocked"])
@@ -98,7 +98,7 @@ final class PersonClassifierTests: XCTestCase {
         metrics.selectedComputeUnits = "cpuOnly"
         let health = LocalAPIContract.health(from: metrics)
         XCTAssertEqual(health.status, "ok")
-        XCTAssertEqual(health.serverVersion, 5)
+        XCTAssertEqual(health.serverVersion, 6)
         XCTAssertEqual(health.model, "MobileCLIP2-S2")
         XCTAssertFalse(health.textEncoderBundled)
         XCTAssertEqual(health.modelPrecision, "float16")
@@ -155,6 +155,107 @@ final class PersonClassifierTests: XCTestCase {
         XCTAssertEqual(UIImage.Orientation.downMirrored.cgImagePropertyOrientation, .downMirrored)
         XCTAssertEqual(UIImage.Orientation.left.cgImagePropertyOrientation, .left)
         XCTAssertEqual(UIImage.Orientation.rightMirrored.cgImagePropertyOrientation, .rightMirrored)
+    }
+
+    func testCropDetectionMapsBackToOriginalTopLeftCoordinates() {
+        let mapper = DetectionMappingService()
+        let result = mapper.originalImageBox(
+            cropTopLeft: NormalizedBoundingBox(x: 0.10, y: 0.20, width: 0.50, height: 0.60),
+            detectionInCropBottomLeft: NormalizedBoundingBox(x: 0.20, y: 0.30, width: 0.40, height: 0.20)
+        )
+        XCTAssertEqual(result.x, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(result.y, 0.50, accuracy: 0.0001)
+        XCTAssertEqual(result.width, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(result.height, 0.12, accuracy: 0.0001)
+    }
+
+    func testVisionBottomLeftToTopLeftConversion() {
+        let result = DetectionMappingService().topLeft(
+            fromVisionBottomLeft: NormalizedBoundingBox(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
+        )
+        XCTAssertEqual(result.y, 0.4, accuracy: 0.0001)
+    }
+
+    func testPixelRectangleNormalizationAndClamp() {
+        let result = DetectionMappingService().normalized(
+            pixelRect: PixelRectangle(x: 250, y: 100, width: 500, height: 300),
+            imageWidth: 1_000, imageHeight: 500
+        )
+        XCTAssertEqual(result.x, 0.25, accuracy: 0.0001)
+        XCTAssertEqual(result.y, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(result.width, 0.50, accuracy: 0.0001)
+        XCTAssertEqual(result.height, 0.60, accuracy: 0.0001)
+    }
+
+    func testIoUCasesAndThreshold() {
+        let merger = DetectionMergeService()
+        let full = NormalizedBoundingBox(x: 0, y: 0, width: 0.5, height: 0.5)
+        XCTAssertEqual(merger.intersectionOverUnion(full, full), 1, accuracy: 0.0001)
+        XCTAssertEqual(merger.intersectionOverUnion(
+            full, NormalizedBoundingBox(x: 0.5, y: 0.5, width: 0.5, height: 0.5)
+        ), 0, accuracy: 0.0001)
+        XCTAssertEqual(DetectionMergeService.intersectionOverUnionThreshold, 0.50)
+    }
+
+    func testDetectionMergeRetainsEvidenceAndHighestConfidence() throws {
+        let first = rawDetection(id: "full", label: "FACE_FEMALE", confidence: 0.6, x: 0.1)
+        let second = rawDetection(id: "crop", label: "FACE_FEMALE", confidence: 0.9, x: 0.11, personID: "person-1")
+        let merged = try XCTUnwrap(DetectionMergeService().merge([first, second]).first)
+        XCTAssertEqual(merged.confidence, 0.9)
+        XCTAssertEqual(Set(merged.sourceDetectionIds), ["full", "crop"])
+        XCTAssertEqual(merged.personIds, ["person-1"])
+    }
+
+    func testDifferentLabelOrLowIoUDoesNotMerge() {
+        let detections = [
+            rawDetection(id: "a", label: "FACE_FEMALE", confidence: 0.8, x: 0.0),
+            rawDetection(id: "b", label: "FACE_MALE", confidence: 0.8, x: 0.0),
+            rawDetection(id: "c", label: "FACE_FEMALE", confidence: 0.8, x: 0.8)
+        ]
+        XCTAssertEqual(DetectionMergeService().merge(detections).count, 3)
+    }
+
+    func testImageSafetyModelsEncodeFiniteJSONWithoutBlockingPolicy() throws {
+        let detection = rawDetection(id: "a", label: "FACE_FEMALE", confidence: 0.8, x: 0.1)
+        let data = try JSONEncoder().encode(detection)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.contains("NaN"))
+        XCTAssertFalse(text.contains("Infinity"))
+        XCTAssertFalse(text.contains("blocked"))
+        XCTAssertTrue(text.contains("normalized-top-left"))
+    }
+
+    func testImageSafetyPipelineIntegrationWithSyntheticImage() async throws {
+        let image = makeCGImage(width: 64, height: 64)
+        let data = try XCTUnwrap(UIImage(cgImage: image).pngData())
+        let response = try await ImageSafetyPipelineService().classify(
+            imageData: data, mimeType: "image/png", requestID: UUID()
+        )
+        XCTAssertTrue(response.success)
+        XCTAssertEqual(response.serverVersion, 6)
+        XCTAssertEqual(response.pipelineVersion, 1)
+        XCTAssertEqual(response.input.pixelWidth, 64)
+        XCTAssertEqual(response.input.pixelHeight, 64)
+        XCTAssertTrue(response.input.orientationNormalized)
+        XCTAssertFalse(response.pipeline.modules.imageDecode.durationMs < 0)
+        XCTAssertNotNil(response.summary.moduleStatuses["nudeNetFullImage"])
+        let encoded = try JSONEncoder().encode(response)
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: encoded))
+        let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        XCTAssertFalse(text.contains("blocked"))
+    }
+
+    private func rawDetection(
+        id: String, label: String, confidence: Double, x: Double, personID: String? = nil
+    ) -> RawNudityDetection {
+        let box = NormalizedBoundingBox(x: x, y: 0.1, width: 0.3, height: 0.3)
+        return RawNudityDetection(
+            detectionId: id, rawLabel: label, confidence: confidence,
+            source: personID == nil ? .fullImage : .personCrop,
+            boundingBox: box, coordinateSystem: "normalized-top-left", rawModelIndex: 1,
+            personId: personID, cropId: personID.map { "\($0)-crop" },
+            boundingBoxInCrop: personID == nil ? nil : box, boundingBoxInOriginalImage: box
+        )
     }
 
     private func sampleClassification(source: DetectionSource) -> PersonClassification {

@@ -1,19 +1,26 @@
 import CoreGraphics
 
 nonisolated struct PersonCropService: Sendable {
-    let paddingFraction: CGFloat
+    let horizontalPaddingFraction: CGFloat
+    let verticalPaddingFraction: CGFloat
 
     init(paddingFraction: CGFloat = PersonClassifierConfiguration.default.cropPaddingFraction) {
-        self.paddingFraction = paddingFraction
+        horizontalPaddingFraction = paddingFraction
+        verticalPaddingFraction = paddingFraction
+    }
+
+    init(horizontalPaddingFraction: CGFloat, verticalPaddingFraction: CGFloat) {
+        self.horizontalPaddingFraction = horizontalPaddingFraction
+        self.verticalPaddingFraction = verticalPaddingFraction
     }
 
     func crop(image: CGImage, detection: HumanDetection) -> PersonCrop? {
         let visionBox = detection.boundingBox.clampedToUnitSquare
         let padded = CGRect(
-            x: visionBox.minX - visionBox.width * paddingFraction,
-            y: visionBox.minY - visionBox.height * paddingFraction,
-            width: visionBox.width * (1 + 2 * paddingFraction),
-            height: visionBox.height * (1 + 2 * paddingFraction)
+            x: visionBox.minX - visionBox.width * horizontalPaddingFraction,
+            y: visionBox.minY - visionBox.height * verticalPaddingFraction,
+            width: visionBox.width * (1 + 2 * horizontalPaddingFraction),
+            height: visionBox.height * (1 + 2 * verticalPaddingFraction)
         ).clampedToUnitSquare
         let pixelRect = Self.pixelRect(forVisionBox: padded, imageWidth: image.width, imageHeight: image.height)
         guard !pixelRect.isEmpty, let cropped = image.cropping(to: pixelRect) else { return nil }
@@ -21,6 +28,8 @@ nonisolated struct PersonCropService: Sendable {
             id: detection.id,
             image: cropped,
             sourceBoundingBox: Self.topLeftBox(fromVisionBox: visionBox),
+            expandedBoundingBox: Self.topLeftBox(fromVisionBox: padded),
+            pixelRect: pixelRect,
             detectionConfidence: detection.confidence,
             detectionSource: detection.source
         )

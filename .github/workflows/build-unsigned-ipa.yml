@@ -9,11 +9,13 @@ on:
       - feature/raw-nudenet-inference-api
       - feature/mobileclip2-person-classifier
       - fix/mobileclip2-ios-device-runtime
+      - feature/modular-image-safety-pipeline
   pull_request:
     branches:
       - main
       - feature/mobileclip2-person-classifier
       - fix/mobileclip2-ios-device-runtime
+      - feature/modular-image-safety-pipeline
 
 permissions:
   contents: read
@@ -190,6 +192,7 @@ jobs:
           mkdir -p build/build-diagnostics "$APP_MODELS"
           rm -rf "$APP_MODELS"/MobileCLIP2S2TextEncoder.mlpackage "$APP_MODELS"/MobileCLIP2S2TextEncoder.mlmodelc
           test -s "$CHECKPOINT_DIR/mobileclip2_s2.pt"
+          python tools/model_conversion/validate_committed_model.py
           test -d "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage"
           test -s "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json"
           test -s "$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json"
@@ -300,6 +303,8 @@ jobs:
           test -s "$app/MobileCLIP2S2PromptEmbeddings.json"
           test -s "$app/MobileCLIP2S2ModelManifest.json"
           test -s "$app/MobileCLIP2S2-MODEL-LICENSE.md"
+          test -d "$app/NudeNet320n.mlmodelc"
+          test -n "$(find "$app/NudeNet320n.mlmodelc" -type f -print -quit)"
           ! find "$app" -iname '*TextEncoder*' -print -quit | grep -q .
           ! find "$app" -name 'mobileclip2_s2.pt' -print -quit | grep -q .
           if ! plutil -replace UIFileSharingEnabled -bool YES "$app/Info.plist"; then
@@ -329,6 +334,10 @@ jobs:
           image_size=$(du -sk "$CONVERTED_DIR/MobileCLIP2S2ImageEncoder.mlpackage" 2>/dev/null | awk '{print $1 * 1024}')
           prompt_size=$(stat -f '%z' "$CONVERTED_DIR/MobileCLIP2S2PromptEmbeddings.json" 2>/dev/null)
           ipa_size=$(stat -f '%z' build/AI-Image-Classifier-unsigned.ipa 2>/dev/null)
+          ipa_sha=$(shasum -a 256 build/AI-Image-Classifier-unsigned.ipa 2>/dev/null | awk '{print $1}')
+          app_size=$(du -sk build/AI-Image-Classifier.xcarchive/Products/Applications/AI-Image-Classifier.app 2>/dev/null | awk '{print $1 * 1024}')
+          nudenet_size=$(du -sk AI-Image-Classifier/Models/NudeNet320n.mlpackage 2>/dev/null | awk '{print $1 * 1024}')
+          nudenet_sha=$(find AI-Image-Classifier/Models/NudeNet320n.mlpackage -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
           model_sha=$(python -c 'import json, os; print(json.load(open(os.environ["CONVERTED_DIR"] + "/MobileCLIP2S2ModelManifest.json"))["checkpointSHA256"])' 2>/dev/null)
           verification=$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])' 2>/dev/null)
           {
@@ -346,6 +355,11 @@ jobs:
             echo "- Previous artifact: 374891484 bytes"
             echo "- Prompt assets bytes: ${prompt_size:-unavailable}"
             echo "- IPA bytes: ${ipa_size:-unavailable}"
+            echo "- IPA SHA-256: ${ipa_sha:-unavailable}"
+            echo "- App uncompressed bytes: ${app_size:-unavailable}"
+            echo "- NudeNet model: NudeNet320n.mlmodelc"
+            echo "- NudeNet source package bytes: ${nudenet_size:-unavailable}"
+            echo "- NudeNet source package tree SHA-256: ${nudenet_sha:-unavailable}"
             echo "- Unit tests: see xcodebuild-tests.log"
             echo "- Conversion verification: ${verification:-unavailable}"
             if [[ -s conversion-verification.json ]]; then
@@ -390,7 +404,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: AI-Image-Classifier-MobileCLIP2-S2-unsigned
+          name: AI-Image-Classifier-ImageSafety-unsigned
           path: |
             build/AI-Image-Classifier-unsigned.ipa
             build/build-diagnostics/

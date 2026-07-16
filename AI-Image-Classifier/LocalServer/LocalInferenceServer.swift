@@ -56,6 +56,7 @@ final class LocalInferenceServer {
 
     private let server: HTTPServer
     private let coordinator: PersonInferenceCoordinator
+    private let imageSafetyPipeline = ImageSafetyPipelineService.shared
     private let metrics = LocalInferenceMetrics()
     private var lifecycleTask: Task<Void, Never>?
     private var modelPreparationTask: Task<Void, Never>?
@@ -180,7 +181,7 @@ final class LocalInferenceServer {
     }
 
     private func prepareModel() async {
-        do { try await coordinator.prepare() } catch { }
+        await imageSafetyPipeline.prepare()
         await refreshMetrics()
     }
 
@@ -188,8 +189,10 @@ final class LocalInferenceServer {
         guard !routesConfigured else { return }
         routesConfigured = true
         let coordinator = coordinator
+        let imageSafetyPipeline = imageSafetyPipeline
         await server.appendRoute("GET /health") { _ in
-            let health = LocalAPIContract.health(from: await coordinator.modelSnapshot())
+            let readiness = await imageSafetyPipeline.readiness()
+            let health = LocalAPIContract.health(from: readiness.mobileCLIP, nudeNet: readiness.nudeNet)
             try? await DiagnosticLogService.shared.appendHealth(health)
             return JSONHTTPResponse.make(health, statusCode: health.modelLoaded ? .ok : .serviceUnavailable)
         }
@@ -208,20 +211,95 @@ final class LocalInferenceServer {
             let state: String
             switch model.state {
             case .notLoaded: state = "notLoaded"
-            case .loading: state = "loading"
+            case .loading, .warming: state = "loading"
             case .ready: state = "ready"
             case .failed: state = "failed"
             }
+            let safety = await imageSafetyPipeline.snapshot()
+            let moduleStatuses = Dictionary(uniqueKeysWithValues: safety.moduleDurations.map {
+                ($0.key, ImageSafetyModuleStatusDTO(status: safety.lastStatus == nil ? "ready" : "completed", lastDurationMs: $0.value))
+            })
             let response = DiagnosticsStatusDTO(
                 sessionId: session?.sessionID ?? "not-started", state: state, stage: model.stage,
-                model: LocalServerConfiguration.modelName, precision: "float16", deploymentTarget: "iOS17",
+                model: LocalServerConfiguration.modelName, precision: "float16", deploymentTarget: "iOS26.2",
                 selectedComputeUnits: model.selectedComputeUnits, attempts: model.loadAttempts,
-                logFilesAvailable: session != nil
+                logFilesAvailable: session != nil,
+                imageSafetyPipeline: ImageSafetyDiagnosticsStatusDTO(
+                    available: true, pipelineVersion: ImageSafetyPipelineService.pipelineVersion,
+                    lastRequestId: safety.lastRequestId, lastStatus: safety.lastStatus,
+                    lastTotalDurationMs: safety.lastTotalDurationMs, modules: moduleStatuses
+                )
             )
             return JSONHTTPResponse.make(response)
         }
 
         let metrics = metrics
+        await server.appendRoute("POST /v1/image-safety-classify") { request in
+            let requestID = UUID()
+            guard LocalAPIContract.isAuthorized(
+                header: request.headers[.authorization], token: configuration.bearerToken
+            ) else {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "unauthorized"), statusCode: .unauthorized
+                )
+            }
+            let contentType = request.headers[.contentType]?
+                .split(separator: ";", maxSplits: 1).first?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let supported: Set<String> = ["image/jpeg", "image/png", "image/heic", "image/heif"]
+            guard let contentType, supported.contains(contentType) else {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "unsupported_media_type"),
+                    statusCode: .unsupportedMediaType
+                )
+            }
+            if let length = request.headers[.contentLength],
+               let count = Int(length), count > configuration.maximumImageBytes {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "payload_too_large"), statusCode: .payloadTooLarge
+                )
+            }
+            let imageData: Data
+            do { imageData = try await request.bodyData } catch {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "invalid_image"), statusCode: .badRequest
+                )
+            }
+            guard imageData.count <= configuration.maximumImageBytes else {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "payload_too_large"), statusCode: .payloadTooLarge
+                )
+            }
+            do {
+                let response = try await imageSafetyPipeline.classify(
+                    imageData: imageData, mimeType: contentType, requestID: requestID
+                )
+                try? await DiagnosticLogService.shared.log(
+                    level: response.pipeline.partialFailure ? "warning" : "info",
+                    category: "imageSafety", event: "imageSafetyRequestCompleted",
+                    details: [
+                        "requestId": response.requestId,
+                        "inputByteCount": String(response.input.byteCount),
+                        "pixelWidth": String(response.input.pixelWidth),
+                        "pixelHeight": String(response.input.pixelHeight),
+                        "totalDurationMs": String(response.pipeline.totalDurationMs),
+                        "personCount": String(response.summary.personCount),
+                        "rawNudityCount": String(response.nudity.allRawDetections.count),
+                        "mergedNudityCount": String(response.nudity.mergedDetections.count)
+                    ]
+                )
+                return JSONHTTPResponse.make(response)
+            } catch ImageSafetyPipelineService.ServiceError.invalidImage {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "invalid_image"), statusCode: .badRequest
+                )
+            } catch {
+                return JSONHTTPResponse.make(
+                    ErrorResponseDTO(success: false, error: "pipeline_failed"), statusCode: .internalServerError
+                )
+            }
+        }
+
         await server.appendRoute("POST /v1/person-classify") { request in
             let requestID = UUID()
             let requestStarted = ContinuousClock.now

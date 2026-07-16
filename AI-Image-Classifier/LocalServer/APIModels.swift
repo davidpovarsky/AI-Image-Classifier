@@ -33,7 +33,23 @@ nonisolated struct HealthResponseDTO: Codable, Equatable, Sendable {
     let selectedComputeUnits: String?
     let modelPrecision: String
     let humanDetector: String
+    let nudeNet: NudeNetHealthDTO
+    let imageSafetyPipeline: ImageSafetyAvailabilityDTO
     let error: String?
+}
+
+nonisolated struct NudeNetHealthDTO: Codable, Equatable, Sendable {
+    let bundled: Bool
+    let loaded: Bool
+    let modelName: String
+    let computeUnits: String
+    let labelsCount: Int
+}
+
+nonisolated struct ImageSafetyAvailabilityDTO: Codable, Equatable, Sendable {
+    let available: Bool
+    let pipelineVersion: Int
+    let endpoint: String
 }
 
 nonisolated struct DiagnosticsStatusDTO: Codable, Equatable, Sendable {
@@ -46,6 +62,21 @@ nonisolated struct DiagnosticsStatusDTO: Codable, Equatable, Sendable {
     let selectedComputeUnits: String?
     let attempts: [ModelLoadAttempt]
     let logFilesAvailable: Bool
+    let imageSafetyPipeline: ImageSafetyDiagnosticsStatusDTO
+}
+
+nonisolated struct ImageSafetyDiagnosticsStatusDTO: Codable, Equatable, Sendable {
+    let available: Bool
+    let pipelineVersion: Int
+    let lastRequestId: String?
+    let lastStatus: PipelineStatus?
+    let lastTotalDurationMs: Int?
+    let modules: [String: ImageSafetyModuleStatusDTO]
+}
+
+nonisolated struct ImageSafetyModuleStatusDTO: Codable, Equatable, Sendable {
+    let status: String
+    let lastDurationMs: Int?
 }
 
 nonisolated struct ErrorResponseDTO: Codable, Equatable, Sendable {
@@ -58,7 +89,10 @@ nonisolated enum LocalAPIContract {
         header == "Bearer \(token)"
     }
 
-    static func health(from snapshot: MobileCLIPServiceMetrics) -> HealthResponseDTO {
+    static func health(
+        from snapshot: MobileCLIPServiceMetrics,
+        nudeNet: NudeNetServiceMetrics = NudeNetServiceMetrics()
+    ) -> HealthResponseDTO {
         let ready = snapshot.state == .ready
             && snapshot.imageEncoderLoaded
             && snapshot.promptEmbeddingsReady
@@ -76,6 +110,18 @@ nonisolated enum LocalAPIContract {
             selectedComputeUnits: snapshot.selectedComputeUnits,
             modelPrecision: "float16",
             humanDetector: "VNDetectHumanRectanglesRequest",
+            nudeNet: NudeNetHealthDTO(
+                bundled: true,
+                loaded: nudeNet.state == .ready,
+                modelName: "NudeNet320n",
+                computeUnits: "all",
+                labelsCount: NudeNetLabels.all.count
+            ),
+            imageSafetyPipeline: ImageSafetyAvailabilityDTO(
+                available: true,
+                pipelineVersion: ImageSafetyPipelineService.pipelineVersion,
+                endpoint: "/v1/image-safety-classify"
+            ),
             error: error
         )
     }

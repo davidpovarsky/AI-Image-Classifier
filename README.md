@@ -1,9 +1,9 @@
 # AI Image Classifier for iOS
 
-This SwiftUI app runs a local, bearer-token-protected person-classification
-server. Vision finds each person, the app expands and crops every detection,
-and MobileCLIP2-S2 performs zero-shot visual classification with four prompt
-ensembles: `woman`, `man`, `uncertain`, and `notPerson`.
+This SwiftUI app runs a local, bearer-token-protected image-evidence server.
+The original MobileCLIP2-S2 person-classification endpoint remains available,
+and a modular image-safety endpoint combines Vision, MobileCLIP2-S2, and the
+bundled NudeNet320n detector without applying a blocking policy.
 
 This system performs visual zero-shot classification.
 It does not determine biological sex or gender identity.
@@ -22,13 +22,27 @@ Blocking policy is intentionally left to the client.
 3. A `MobileCLIPService` actor retains both Core ML encoders and serialized
    inference. Category embeddings are produced from multiple prompts, cached
    as a generated build asset, and validated against the prompt configuration.
-4. The local HTTP layer returns every detected person, Vision confidence,
+4. NudeNet runs once on the normalized full image and sequentially on each
+   selected person crop. Crop detections are mapped back to the original image.
+5. Same-label NudeNet detections with IoU >= 0.50 are merged while retaining
+   every raw detection, confidence, source ID, and person association.
+6. The local HTTP layer returns every detected person, Vision confidence,
    normalized top-left bounding box, predicted visual class, and all four
    softmax scores. It never returns `allowed`, `blocked`, or risk policy.
 
-NudeNet remains in the repository as an explicit legacy subsystem for possible
-future nudity detection. It is not the default mode and its output is never
-mixed with MobileCLIP scores.
+```text
+Input Image
+   |-- Vision Person Detection
+   |      `-- Person Crops
+   |             |-- MobileCLIP2-S2
+   |             `-- NudeNet Crop Detection
+   |-- NudeNet Full Image Detection
+   |-- Coordinate Mapping
+   `-- Duplicate Merge
+```
+
+The server returns model evidence and module diagnostics. Blocking policy is
+intentionally implemented by the client.
 
 ## Model provenance and conversion
 
@@ -72,7 +86,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```
 
 See `LOCAL_SERVER.md` for complete request, response, readiness, and error
-contracts.
+contracts, and `docs/image-safety-api.md` for the combined pipeline.
 
 ## Privacy and limitations
 
