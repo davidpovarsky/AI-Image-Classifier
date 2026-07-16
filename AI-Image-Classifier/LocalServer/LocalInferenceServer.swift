@@ -211,7 +211,7 @@ final class LocalInferenceServer {
             let state: String
             switch model.state {
             case .notLoaded: state = "notLoaded"
-            case .loading, .warming: state = "loading"
+            case .loading: state = "loading"
             case .ready: state = "ready"
             case .failed: state = "failed"
             }

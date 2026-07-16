@@ -145,7 +145,7 @@ actor ImageSafetyPipelineService {
                     personId: personID, cropId: "\(personID)-crop",
                     predictedClass: classification.predictedClass,
                     confidence: classification.confidence, scores: classification.scores,
-                    embedding: EmbeddingDiagnostics(dimension: 512, norm: 1, finite: true)
+                    embedding: EmbeddingDiagnostics(included: false, dimension: 512, norm: 1, finite: true)
                 ))
             } catch {
                 mobileError = PipelineError(error)

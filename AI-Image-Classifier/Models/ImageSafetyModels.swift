@@ -72,7 +72,7 @@ nonisolated struct PersonCropEvidence: Codable, Equatable, Sendable {
 }
 
 nonisolated struct EmbeddingDiagnostics: Codable, Equatable, Sendable {
-    let included = false
+    let included: Bool
     let dimension: Int
     let norm: Float
     let finite: Bool
