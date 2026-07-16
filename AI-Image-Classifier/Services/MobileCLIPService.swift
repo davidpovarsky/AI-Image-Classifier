@@ -149,7 +149,7 @@ actor MobileCLIPService {
         let provider = try MLDictionaryFeatureProvider(dictionary: [
             inputName: MLFeatureValue(pixelBuffer: pixelBuffer)
         ])
-        let output = try imageEncoder.prediction(from: provider)
+        let output = try imageEncoder.prediction(from: provider, options: MLPredictionOptions())
         guard let feature = output.featureNames.lazy.compactMap({ output.featureValue(for: $0) })
             .first(where: { $0.type == .multiArray }),
               let multiArray = feature.multiArrayValue,
@@ -217,7 +217,7 @@ actor MobileCLIPService {
         }
         let buffer = try makeBlankPixelBuffer()
         let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: MLFeatureValue(pixelBuffer: buffer)])
-        let output = try model.prediction(from: provider)
+        let output = try model.prediction(from: provider, options: MLPredictionOptions())
         guard let array = output.featureNames.lazy.compactMap({ output.featureValue(for: $0)?.multiArrayValue }).first else {
             throw ServiceError.unsupportedModelOutput
         }
