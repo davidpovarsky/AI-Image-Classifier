@@ -340,6 +340,7 @@ jobs:
           app_size=$(du -sk build/AI-Image-Classifier.xcarchive/Products/Applications/AI-Image-Classifier.app 2>/dev/null | awk '{print $1 * 1024}')
           nudenet_size=$(du -sk AI-Image-Classifier/Models/NudeNet320n.mlpackage 2>/dev/null | awk '{print $1 * 1024}')
           nudenet_sha=$(find AI-Image-Classifier/Models/NudeNet320n.mlpackage -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
+          image_sha=$(python -c 'import json, os; print(json.load(open(os.environ["CONVERTED_DIR"] + "/MobileCLIP2S2ModelManifest.json"))["imageEncoderSHA256"])' 2>/dev/null)
           model_sha=$(python -c 'import json, os; print(json.load(open(os.environ["CONVERTED_DIR"] + "/MobileCLIP2S2ModelManifest.json"))["checkpointSHA256"])' 2>/dev/null)
           verification=$(python -c 'import json; print(json.load(open("conversion-verification.json"))["passed"])' 2>/dev/null)
           {
@@ -402,6 +403,24 @@ jobs:
           fi
           cp "$CONVERTED_DIR/MobileCLIP2S2ModelManifest.json" build/model-manifest.json 2>/dev/null || true
           cp conversion-verification.json build/conversion-verification.json 2>/dev/null || true
+          python - "${ipa_size:-}" "${ipa_sha:-}" "${app_size:-}" "${image_size:-}" "${image_sha:-}" "${nudenet_size:-}" "${nudenet_sha:-}" <<'PY'
+          import json, os, pathlib, sys
+          ipa_size, ipa_sha, app_size, image_size, image_sha, nudenet_size, nudenet_sha = sys.argv[1:]
+          def integer(value):
+              return int(value) if value.isdigit() else None
+          metadata = {
+              "branch": os.environ.get("GITHUB_REF_NAME"),
+              "commit": os.environ.get("GITHUB_SHA"),
+              "ipa": {"filename": "AI-Image-Classifier-unsigned.ipa", "bytes": integer(ipa_size), "sha256": ipa_sha or None},
+              "app": {"uncompressedBytes": integer(app_size)},
+              "mobileCLIP2": {"model": "MobileCLIP2-S2", "imageEncoderBytes": integer(image_size), "imageEncoderSHA256": image_sha or None},
+              "nudeNet": {"filename": "NudeNet320n.mlmodelc", "sourcePackageBytes": integer(nudenet_size), "sourcePackageTreeSHA256": nudenet_sha or None},
+              "textEncoderBundled": False,
+              "checkpointBundled": False,
+          }
+          path = pathlib.Path("build/build-diagnostics/artifact-metadata.json")
+          path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+          PY
 
       - name: Upload unsigned IPA, model manifest, verification, and diagnostics
         if: always()

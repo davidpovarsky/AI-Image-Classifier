@@ -243,6 +243,7 @@ nonisolated final class PersonClassifierTests: XCTestCase {
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: encoded))
         let text = try XCTUnwrap(String(data: encoded, encoding: .utf8))
         XCTAssertFalse(text.contains("blocked"))
+        print("IMAGE_SAFETY_INTEGRATION_RESPONSE \(text)")
     }
 
     private func rawDetection(
