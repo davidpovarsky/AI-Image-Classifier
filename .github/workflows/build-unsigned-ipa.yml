@@ -421,6 +421,7 @@ jobs:
           path = pathlib.Path("build/build-diagnostics/artifact-metadata.json")
           path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
           PY
+          cat build/build-diagnostics/artifact-metadata.json
 
       - name: Upload unsigned IPA, model manifest, verification, and diagnostics
         if: always()
