@@ -149,7 +149,7 @@ actor MobileCLIPService {
         let provider = try MLDictionaryFeatureProvider(dictionary: [
             inputName: MLFeatureValue(pixelBuffer: pixelBuffer)
         ])
-        let output = try imageEncoder.prediction(from: provider, options: MLPredictionOptions())
+        let output = try predict(imageEncoder, from: provider)
         guard let feature = output.featureNames.lazy.compactMap({ output.featureValue(for: $0) })
             .first(where: { $0.type == .multiArray }),
               let multiArray = feature.multiArrayValue,
@@ -226,6 +226,10 @@ actor MobileCLIPService {
               embedding.count == expected, EmbeddingMath.normalize(embedding) != nil else {
             throw ServiceError.numericalFailure
         }
+    }
+
+    private func predict(_ model: MLModel, from provider: MLFeatureProvider) throws -> MLFeatureProvider {
+        try model.prediction(from: provider, options: MLPredictionOptions())
     }
 
     private func makeBlankPixelBuffer() throws -> CVPixelBuffer {
