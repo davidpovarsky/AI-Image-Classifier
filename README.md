@@ -117,3 +117,7 @@ The Apple model terms limit the model to research purposes and require the
 license and attribution on redistribution. Review
 `tools/MobileCLIPConversion/MODEL_LICENSE.md` before using or distributing the
 generated model. This is not legal advice.
+
+## Desktop image filter
+
+See [CrossPlatformImageFilter](CrossPlatformImageFilter/README.md).

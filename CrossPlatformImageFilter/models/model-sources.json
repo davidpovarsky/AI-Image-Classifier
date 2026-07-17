@@ -1,0 +1,33 @@
+{
+  "mobileCLIP2": {
+    "name": "MobileCLIP2-S2",
+    "source": "apple/MobileCLIP2-S2",
+    "revision": "72424e7025436db18f15c3eff6ee8c7c15ad4481",
+    "sourceSHA256": "37c2d839a856491f2fcc82c40dc28672dbd0907235b4cd4c38dfff6457f0c09f",
+    "implementationRepository": "https://github.com/apple/ml-mobileclip",
+    "implementationRevision": "aecfb5453d022e9deff12f81a150ea8f35194baa",
+    "openClipRevision": "54c9754a94baacac5b2d9b1c76318078d48912af",
+    "declaredLicense": "Apple Machine Learning Research Model License Agreement",
+    "licenseVerificationStatus": "documented-not-legal-advice"
+  },
+  "nudeNet": {
+    "name": "NudeNet320n",
+    "source": "https://pypi.org/project/nudenet/3.4.2/",
+    "revision": "3.4.2",
+    "packageFilename": "nudenet-3.4.2-py3-none-any.whl",
+    "packageSHA256": "5937dbd84e5d8e5de038f08ffea5a1bb50a08475776bf2b4795914ce0eaf0331",
+    "sourceSHA256": "5937dbd84e5d8e5de038f08ffea5a1bb50a08475776bf2b4795914ce0eaf0331",
+    "modelSHA256": "c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f",
+    "declaredLicense": "Conflicting package metadata: METADATA says MIT; bundled LICENSE and LICENSE.md both contain AGPL-3.0",
+    "licenseVerificationStatus": "conflict-documented-not-legal-advice"
+  },
+  "personDetector": {
+    "name": "YOLOX-Nano",
+    "source": "https://github.com/Megvii-BaseDetection/YOLOX",
+    "revision": "419778480ab6ec0590e5d3831b3afb3b46ab2aa3",
+    "checkpointURL": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.pth",
+    "sourceSHA256": "cd28f55fbbc1829f99d9ac9b38a16d259a22889739c8728ea877610201feff7b",
+    "declaredLicense": "YOLOX source is Apache-2.0; checkpoint has no separate statement",
+    "licenseVerificationStatus": "checkpoint-terms-unclear-not-legal-advice"
+  }
+}

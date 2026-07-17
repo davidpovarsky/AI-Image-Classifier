@@ -1,0 +1,17 @@
+[policy]
+block_action = "blur"
+woman_min_score = 0.50
+woman_min_margin_over_man = 0.15
+face_fallback_woman_min_score = 0.56
+whole_image_fallback_woman_min_score = 0.65
+uncertain_min_score = 0.96
+block_woman_without_margin_if_score_at_least = 0.78
+
+[policy.nudity_thresholds]
+BUTTOCKS_EXPOSED = 0.45
+FEMALE_BREAST_EXPOSED = 0.40
+FEMALE_GENITALIA_EXPOSED = 0.35
+ANUS_EXPOSED = 0.35
+MALE_GENITALIA_EXPOSED = 0.35
+FEMALE_BREAST_COVERED = 0.90
+BUTTOCKS_COVERED = 0.90

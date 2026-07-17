@@ -1,0 +1,14 @@
+{
+  "topLevel": [
+    "success", "requestId", "pipelineVersion", "timestamp", "input", "pipeline",
+    "people", "nudity", "summary", "warnings", "errors"
+  ],
+  "pipelineModules": [
+    "imageDecode", "personDetection", "personCrops", "mobileCLIP2",
+    "nudeNetFullImage", "nudeNetPersonCrops", "coordinateMapping", "detectionMerge"
+  ],
+  "nudity": [
+    "fullImageRawDetections", "personCropRawDetections", "allRawDetections",
+    "mergedDetections", "unassignedDetections"
+  ]
+}

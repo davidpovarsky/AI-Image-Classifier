@@ -1,0 +1,9 @@
+# Reproducible Python 3.12 runtime pins. Platform markers ensure exactly one
+# ONNX Runtime distribution is selected in a normal installation.
+mitmproxy==12.2.3
+numpy==2.3.5
+onnxruntime-directml==1.24.4; sys_platform == "win32"
+onnxruntime==1.27.0; sys_platform != "win32"
+Pillow==12.3.0
+pillow-heif==1.1.1
+platformdirs==4.5.1

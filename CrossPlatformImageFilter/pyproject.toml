@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-ai-image-filter"
+version = "0.1.0"
+description = "Cross-platform local HTTPS image filtering with ONNX Runtime and mitmproxy"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "MIT" }
+authors = [{ name = "AI Image Classifier contributors" }]
+dependencies = [
+  "mitmproxy==12.2.3",
+  "numpy==2.3.5",
+  "onnxruntime-directml==1.24.4; sys_platform == 'win32'",
+  "onnxruntime==1.27.0; sys_platform != 'win32'",
+  "Pillow==12.3.0",
+  "pillow-heif==1.1.1",
+  "platformdirs==4.5.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build==1.4.0",
+  "mypy==1.19.1",
+  "pytest==9.0.2",
+  "pytest-cov==7.0.0",
+  "ruff==0.15.7",
+]
+export = [
+  "huggingface-hub==0.34.4",
+  "onnx==1.19.0",
+  "onnxscript==0.5.6",
+  "open-clip-torch==3.2.0",
+  "torch==2.8.0",
+  "torchvision==0.23.0",
+]
+
+[project.scripts]
+local-image-filter = "local_image_filter.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/local_image_filter"]
+
+[tool.hatch.build]
+include = [
+  "src/local_image_filter/**/*.py",
+  "src/local_image_filter/resources/*.toml",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "pillow_heif", "pillow_heif.*"]
+ignore_missing_imports = true

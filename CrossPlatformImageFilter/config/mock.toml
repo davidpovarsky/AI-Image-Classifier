@@ -1,0 +1,8 @@
+[runtime]
+mock_models = true
+
+[cache]
+enabled = false
+
+[diagnostics]
+enabled = false
