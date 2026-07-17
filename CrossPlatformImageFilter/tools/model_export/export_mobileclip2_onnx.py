@@ -60,6 +60,8 @@ def main() -> None:
     example = torch.rand(1, 3, contract.image_size, contract.image_size)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    # Torch 2.8's dynamo path emits local functions and then fails its own
+    # opset-18 version-conversion pass; the legacy path exports opset 18 directly.
     torch.onnx.export(
         image_encoder,
         (example,),
@@ -68,7 +70,7 @@ def main() -> None:
         output_names=["embedding"],
         opset_version=args.opset,
         do_constant_folding=True,
-        dynamo=True,
+        dynamo=False,
     )
 
     tokenizer = open_clip.get_tokenizer(contract.model_name)
