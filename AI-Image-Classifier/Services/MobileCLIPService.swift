@@ -40,6 +40,28 @@ nonisolated enum EmbeddingMath {
 actor MobileCLIPService {
     static let shared = MobileCLIPService()
     nonisolated static let computeUnitFallbackOrder = ["cpuAndGPU", "cpuOnly", "all"]
+    nonisolated static let ios27GPUWorkaroundMinimumMajorVersion = 27
+    nonisolated static let ios27AndLaterComputeUnitFallbackOrder = ["cpuOnly"]
+
+    nonisolated static func computeUnitCandidateNames(
+        forOSMajorVersion majorVersion: Int
+    ) -> [String] {
+        if majorVersion >= ios27GPUWorkaroundMinimumMajorVersion {
+            return ios27AndLaterComputeUnitFallbackOrder
+        }
+
+        return computeUnitFallbackOrder
+    }
+
+    nonisolated static func computeUnitPolicyReason(
+        forOSMajorVersion majorVersion: Int
+    ) -> String {
+        if majorVersion >= ios27GPUWorkaroundMinimumMajorVersion {
+            return "ios27MPSGraphSDPAWorkaround"
+        }
+
+        return "defaultComputeFallback"
+    }
 
     enum ServiceError: Error, Equatable {
         case modelUnavailable
@@ -82,16 +104,62 @@ actor MobileCLIPService {
             let modelURL = try Self.bundledURL(named: "MobileCLIP2S2ImageEncoder", extension: "mlmodelc")
             try? await diagnostics.log(level: "info", category: "modelLoad", event: "modelURLResolved", details: ["url": modelURL.path()])
             metrics.stage = "imageEncoderLoad"
-            let candidates: [(MLComputeUnits, String)] = [(.cpuAndGPU, "cpuAndGPU"), (.cpuOnly, "cpuOnly"), (.all, "all")]
+            let operatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+            let operatingSystemVersionString =
+                ProcessInfo.processInfo.operatingSystemVersionString
+            let policyReason = Self.computeUnitPolicyReason(
+                forOSMajorVersion: operatingSystemVersion.majorVersion
+            )
+            let candidates = Self.computeUnitCandidates(
+                forOSMajorVersion: operatingSystemVersion.majorVersion
+            )
+            let candidateOrder = candidates
+                .map(\.name)
+                .joined(separator: ",")
+            try? await diagnostics.log(
+                level: "info",
+                category: "modelLoad",
+                event: "computeUnitPolicySelected",
+                details: [
+                    "operatingSystemVersion": operatingSystemVersionString,
+                    "osMajorVersion": String(operatingSystemVersion.majorVersion),
+                    "osMinorVersion": String(operatingSystemVersion.minorVersion),
+                    "osPatchVersion": String(operatingSystemVersion.patchVersion),
+                    "policyReason": policyReason,
+                    "candidateOrder": candidateOrder,
+                    "model": "MobileCLIP2-S2"
+                ]
+            )
             for (units, name) in candidates {
                 let attemptStarted = ContinuousClock.now
-                try? await diagnostics.log(level: "info", category: "modelLoad", event: "attemptStarted", details: ["computeUnits": name])
+                try? await diagnostics.log(
+                    level: "info",
+                    category: "modelLoad",
+                    event: "attemptStarted",
+                    details: [
+                        "computeUnits": name,
+                        "operatingSystemVersion": operatingSystemVersionString,
+                        "osMajorVersion": String(operatingSystemVersion.majorVersion),
+                        "policyReason": policyReason,
+                        "candidateOrder": candidateOrder
+                    ]
+                )
                 do {
                     let modelConfiguration = MLModelConfiguration()
                     modelConfiguration.computeUnits = units
                     let model = try MLModel(contentsOf: modelURL, configuration: modelConfiguration)
                     metrics.stage = "smokeTest"
-                    try? await diagnostics.log(level: "info", category: "modelLoad", event: "smokeTestStarted", details: ["computeUnits": name])
+                    try? await diagnostics.log(
+                        level: "info",
+                        category: "modelLoad",
+                        event: "smokeTestStarted",
+                        details: [
+                            "computeUnits": name,
+                            "operatingSystemVersion": operatingSystemVersionString,
+                            "osMajorVersion": String(operatingSystemVersion.majorVersion),
+                            "policyReason": policyReason
+                        ]
+                    )
                     try smokeTest(model)
                     let attempt = Self.attempt(url: modelURL, units: name, started: attemptStarted, error: nil)
                     metrics.loadAttempts.append(attempt)
@@ -99,14 +167,30 @@ actor MobileCLIPService {
                     metrics.imageEncoderLoaded = true
                     metrics.smokeTestPassed = true
                     metrics.selectedComputeUnits = name
-                    try? await diagnostics.log(level: "info", category: "modelLoad", event: "smokeTestSucceeded", details: ["computeUnits": name])
+                    try? await diagnostics.log(
+                        level: "info",
+                        category: "modelLoad",
+                        event: "smokeTestSucceeded",
+                        details: [
+                            "computeUnits": name,
+                            "operatingSystemVersion": operatingSystemVersionString,
+                            "osMajorVersion": String(operatingSystemVersion.majorVersion),
+                            "policyReason": policyReason
+                        ]
+                    )
                     break
                 } catch {
                     let attempt = Self.attempt(url: modelURL, units: name, started: attemptStarted, error: error)
                     metrics.loadAttempts.append(attempt)
                     try? await diagnostics.log(level: "error", category: "modelLoad", event: metrics.stage == "smokeTest" ? "smokeTestFailed" : "attemptFailed", details: [
                         "computeUnits": name, "domain": attempt.errorDomain ?? "unknown",
-                        "code": String(attempt.errorCode ?? 0), "description": attempt.errorDescription ?? "unknown"
+                        "code": String(attempt.errorCode ?? 0), "description": attempt.errorDescription ?? "unknown",
+                        "failureReason": attempt.failureReason ?? "unknown",
+                        "recoverySuggestion": attempt.recoverySuggestion ?? "unknown",
+                        "operatingSystemVersion": operatingSystemVersionString,
+                        "osMajorVersion": String(operatingSystemVersion.majorVersion),
+                        "policyReason": policyReason,
+                        "candidateOrder": candidateOrder
                     ])
                     metrics.stage = "imageEncoderLoad"
                 }
@@ -230,6 +314,26 @@ actor MobileCLIPService {
 
     private func predict(_ model: MLModel, from provider: MLFeatureProvider) throws -> MLFeatureProvider {
         try model.prediction(from: provider, options: MLPredictionOptions())
+    }
+
+    private static func computeUnitCandidates(
+        forOSMajorVersion majorVersion: Int
+    ) -> [(units: MLComputeUnits, name: String)] {
+        computeUnitCandidateNames(forOSMajorVersion: majorVersion).compactMap { name in
+            switch name {
+            case "cpuOnly":
+                return (.cpuOnly, name)
+
+            case "cpuAndGPU":
+                return (.cpuAndGPU, name)
+
+            case "all":
+                return (.all, name)
+
+            default:
+                return nil
+            }
+        }
     }
 
     private func makeBlankPixelBuffer() throws -> CVPixelBuffer {

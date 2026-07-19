@@ -127,6 +127,59 @@ nonisolated final class PersonClassifierTests: XCTestCase {
         XCTAssertEqual(MobileCLIPService.computeUnitFallbackOrder, ["cpuAndGPU", "cpuOnly", "all"])
     }
 
+    func testMobileCLIPComputePolicyKeepsDefaultFallbackBeforeIOS27() {
+        XCTAssertEqual(
+            MobileCLIPService.computeUnitCandidateNames(
+                forOSMajorVersion: 26
+            ),
+            ["cpuAndGPU", "cpuOnly", "all"]
+        )
+    }
+
+    func testMobileCLIPComputePolicyUsesCPUOnlyOnIOS27() {
+        XCTAssertEqual(
+            MobileCLIPService.computeUnitCandidateNames(
+                forOSMajorVersion: 27
+            ),
+            ["cpuOnly"]
+        )
+    }
+
+    func testMobileCLIPComputePolicyUsesCPUOnlyAfterIOS27() {
+        XCTAssertEqual(
+            MobileCLIPService.computeUnitCandidateNames(
+                forOSMajorVersion: 28
+            ),
+            ["cpuOnly"]
+        )
+    }
+
+    func testIOS27ComputePolicyDoesNotContainGPUOrAll() {
+        let names = MobileCLIPService.computeUnitCandidateNames(
+            forOSMajorVersion: 27
+        )
+
+        XCTAssertFalse(names.contains("cpuAndGPU"))
+        XCTAssertFalse(names.contains("all"))
+        XCTAssertFalse(names.contains("cpuAndNeuralEngine"))
+    }
+
+    func testIOS27ComputePolicyReasonIsCrashWorkaround() {
+        XCTAssertEqual(
+            MobileCLIPService.computeUnitPolicyReason(
+                forOSMajorVersion: 27
+            ),
+            "ios27MPSGraphSDPAWorkaround"
+        )
+
+        XCTAssertEqual(
+            MobileCLIPService.computeUnitPolicyReason(
+                forOSMajorVersion: 26
+            ),
+            "defaultComputeFallback"
+        )
+    }
+
     func testDiagnosticSessionCreatesFilesWritesJSONLAndExports() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

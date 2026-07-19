@@ -90,6 +90,19 @@ iOS may suspend an ordinary foreground app. No unsupported background mode was
 added, so keep the app active while using the server. The server exposes only
 raw model observations and scores; it does not expose or apply NudeNet policy.
 
+## iPadOS 27 MobileCLIP2 compute-unit workaround
+
+On iOS/iPadOS major version 27 or later, MobileCLIP2-S2 is loaded
+with CPU-only compute units. This avoids an observed native
+MPSGraph crash while compiling or executing the model's
+scaled-dot-product-attention graph during the startup smoke test.
+
+Earlier operating-system versions retain the existing fallback order:
+CPU+GPU, CPU-only, then all compute units.
+
+The workaround applies only to MobileCLIP2-S2. NudeNet remains
+unchanged.
+
 ## `POST /v1/image-safety-classify`
 
 This endpoint preserves the person endpoint and adds modular full-image and
