@@ -1,6 +1,9 @@
 name: Commercial desktop CI
 
 on:
+  push:
+    branches:
+      - feature/commercial-desktop-product
   workflow_dispatch:
 
 permissions:
