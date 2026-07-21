@@ -339,6 +339,7 @@ jobs:
           PACKAGE: ${{ needs.unsigned-package.result }}
         run: |
           set -euo pipefail
+          mkdir -p reports
           find reports -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
           args=()
           while IFS= read -r path; do args+=(--cargo-metadata "$path"); done < <(find reports -name 'rust-metadata-*.json' -type f)

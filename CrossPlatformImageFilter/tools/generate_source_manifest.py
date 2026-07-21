@@ -17,7 +17,7 @@ EXCLUDED_PARTS = {
     "target",
 }
 EXCLUDED_ROOT_PARTS = {"build", "diagnostics", "dist", "logs", "reports"}
-EXCLUDED_ANYWHERE_PARTS = {"dist", "gen"}
+EXCLUDED_ANYWHERE_PARTS = {"build", "dist", "gen"}
 EXCLUDED_NAMES = {"MANIFEST.sha256", "runtime-manifest.json", "cache.sqlite3"}
 EXCLUDED_SUFFIXES = {".onnx", ".npz", ".pt", ".pyc"}
 
