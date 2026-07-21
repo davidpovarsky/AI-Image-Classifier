@@ -1,0 +1,7 @@
+{
+  "warning": "TEST KEY ONLY. Production builds must reject this key ID.",
+  "testOnly": true,
+  "keyId": "development-policy-2026",
+  "algorithm": "Ed25519",
+  "privateSeedBase64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+}

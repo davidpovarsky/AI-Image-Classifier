@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-image-filter.example/schemas/policy-bundle.schema.json",
+  "title": "Local AI Image Filter signed policy bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "policyId", "revision", "channel", "issuedAt", "expiresAt",
+    "minimumEngineVersion", "minimumProductVersion", "subject", "policy",
+    "processing", "metadata", "signature"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policyId": { "$ref": "#/$defs/identifier" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "channel": { "$ref": "#/$defs/identifier" },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "minimumEngineVersion": { "$ref": "#/$defs/version" },
+    "minimumProductVersion": { "$ref": "#/$defs/version" },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "enum": ["vendor-global", "tenant", "device"] },
+        "id": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_action", "woman_min_score", "woman_min_margin_over_man",
+        "face_fallback_woman_min_score", "whole_image_fallback_woman_min_score",
+        "uncertain_min_score", "block_woman_without_margin_if_score_at_least",
+        "nudity_thresholds"
+      ],
+      "properties": {
+        "block_action": { "enum": ["blur", "replace", "error"] },
+        "woman_min_score": { "$ref": "#/$defs/threshold" },
+        "woman_min_margin_over_man": { "$ref": "#/$defs/threshold" },
+        "face_fallback_woman_min_score": { "$ref": "#/$defs/threshold" },
+        "whole_image_fallback_woman_min_score": { "$ref": "#/$defs/threshold" },
+        "uncertain_min_score": { "$ref": "#/$defs/threshold" },
+        "block_woman_without_margin_if_score_at_least": { "$ref": "#/$defs/threshold" },
+        "nudity_thresholds": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+          "additionalProperties": { "$ref": "#/$defs/threshold" }
+        }
+      }
+    },
+    "processing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_width", "minimum_height", "minimum_area", "maximum_dimension",
+        "maximum_total_pixels", "maximum_person_crops", "horizontal_crop_padding",
+        "vertical_crop_padding", "blur_radius", "replacement_behavior",
+        "animated_image_mode", "host_exceptions", "diagnostics_privacy_level"
+      ],
+      "properties": {
+        "minimum_width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "minimum_height": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "minimum_area": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "maximum_dimension": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "maximum_total_pixels": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "maximum_person_crops": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "horizontal_crop_padding": { "type": "number", "minimum": 0, "maximum": 1 },
+        "vertical_crop_padding": { "type": "number", "minimum": 0, "maximum": 1 },
+        "blur_radius": { "type": "number", "minimum": 0, "maximum": 512 },
+        "replacement_behavior": { "enum": ["placeholder", "solid"] },
+        "animated_image_mode": { "enum": ["replace", "sample"] },
+        "host_exceptions": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "type": "string", "maxLength": 253 }
+        },
+        "diagnostics_privacy_level": { "enum": ["strict", "minimal"] }
+      }
+    },
+    "metadata": { "type": "object" },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keyId", "algorithm", "signature"],
+      "properties": {
+        "keyId": { "$ref": "#/$defs/identifier" },
+        "algorithm": { "const": "Ed25519" },
+        "signature": { "type": "string", "contentEncoding": "base64" }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.(0|[1-9][0-9]*)){0,2}$" },
+    "threshold": { "type": "number", "minimum": 0, "maximum": 1.01 }
+  }
+}

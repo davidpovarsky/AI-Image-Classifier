@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+from local_image_filter import cli
+
+
+def test_production_entrypoint_delegates_to_existing_cli() -> None:
+    root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, str(root / "product/engine/entrypoint.py"), "--help"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "local-image-filter" in result.stdout
+
+
+def test_pyinstaller_spec_is_onedir_and_excludes_model_weights() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source = (root / "product/engine/engine.spec").read_text(encoding="utf-8")
+    assert "COLLECT(" in source
+    assert "exclude_binaries=True" in source
+    assert "person_detector.onnx" not in source
+    assert "models/" not in source
+    assert "onefile" not in source.lower()
+
+
+def test_packaged_run_uses_bundled_mitmdump(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    def fake_mitmdump(arguments: list[str]) -> int:
+        captured.extend(arguments)
+        return 0
+
+    mitmproxy = ModuleType("mitmproxy")
+    tools = ModuleType("mitmproxy.tools")
+    main = ModuleType("mitmproxy.tools.main")
+    main.mitmdump = fake_mitmdump  # type: ignore[attr-defined]
+    mitmproxy.tools = tools  # type: ignore[attr-defined]
+    tools.main = main  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mitmproxy", mitmproxy)
+    monkeypatch.setitem(sys.modules, "mitmproxy.tools", tools)
+    monkeypatch.setitem(sys.modules, "mitmproxy.tools.main", main)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    arguments = argparse.Namespace(
+        config=None,
+        overlay=[],
+        listen_host="127.0.0.1",
+        listen_port=18080,
+        mode="regular",
+        mitm_args=[],
+    )
+
+    assert cli._run(arguments) == 0
+    assert captured[:6] == [
+        "--listen-host",
+        "127.0.0.1",
+        "--listen-port",
+        "18080",
+        "--mode",
+        "regular",
+    ]
+    assert "-s" in captured

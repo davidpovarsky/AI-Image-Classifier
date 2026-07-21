@@ -1,0 +1,19 @@
+{
+  "signed": {
+    "_type": "root",
+    "spec_version": "1.0.31",
+    "version": 1,
+    "expires": "2030-07-21T00:00:00Z",
+    "consistent_snapshot": true,
+    "keys": {},
+    "roles": {
+      "root": { "keyids": [], "threshold": 1 },
+      "snapshot": { "keyids": [], "threshold": 1 },
+      "targets": { "keyids": [], "threshold": 1 },
+      "timestamp": { "keyids": [], "threshold": 1 }
+    }
+  },
+  "signatures": [],
+  "releaseBlocked": true,
+  "reason": "Production TUF root keys have not been provisioned. This placeholder cannot verify metadata."
+}

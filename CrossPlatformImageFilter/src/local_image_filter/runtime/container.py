@@ -131,6 +131,7 @@ def build_runtime(settings: Settings) -> RuntimeContainer:
         {
             "manifest": manifest_fingerprint,
             "policy": policy_fingerprint,
+            "policyRevision": settings.section("signed_policy").get("revision"),
             "processing": processing_fingerprint,
             "merge": settings.section("merge"),
         }

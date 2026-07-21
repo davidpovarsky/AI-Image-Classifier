@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "policyId": "vendor-base",
+  "revision": 1,
+  "channel": "stable",
+  "issuedAt": "2026-07-21T00:00:00Z",
+  "expiresAt": "2036-07-21T00:00:00Z",
+  "minimumEngineVersion": "0.1.0",
+  "minimumProductVersion": "0.1.0",
+  "subject": { "type": "vendor-global", "id": "local-ai-image-filter" },
+  "policy": {
+    "block_action": "blur",
+    "woman_min_score": 0.42,
+    "woman_min_margin_over_man": 0.10,
+    "face_fallback_woman_min_score": 0.48,
+    "whole_image_fallback_woman_min_score": 0.58,
+    "uncertain_min_score": 0.90,
+    "block_woman_without_margin_if_score_at_least": 0.70,
+    "nudity_thresholds": {
+      "FEMALE_GENITALIA_COVERED": 0.80,
+      "FACE_FEMALE": 1.01,
+      "BUTTOCKS_EXPOSED": 0.35,
+      "FEMALE_BREAST_EXPOSED": 0.30,
+      "FEMALE_GENITALIA_EXPOSED": 0.30,
+      "MALE_BREAST_EXPOSED": 1.01,
+      "ANUS_EXPOSED": 0.30,
+      "FEET_EXPOSED": 1.01,
+      "BELLY_COVERED": 1.01,
+      "FEET_COVERED": 1.01,
+      "ARMPITS_COVERED": 1.01,
+      "ARMPITS_EXPOSED": 1.01,
+      "FACE_MALE": 1.01,
+      "BELLY_EXPOSED": 0.75,
+      "MALE_GENITALIA_EXPOSED": 0.30,
+      "ANUS_COVERED": 0.90,
+      "FEMALE_BREAST_COVERED": 0.82,
+      "BUTTOCKS_COVERED": 0.82
+    }
+  },
+  "processing": {
+    "minimum_width": 90,
+    "minimum_height": 90,
+    "minimum_area": 12000,
+    "maximum_dimension": 2048,
+    "maximum_total_pixels": 12000000,
+    "maximum_person_crops": 12,
+    "horizontal_crop_padding": 0.15,
+    "vertical_crop_padding": 0.20,
+    "blur_radius": 32.0,
+    "replacement_behavior": "placeholder",
+    "animated_image_mode": "replace",
+    "host_exceptions": ["localhost", "127.0.0.1", "::1"],
+    "diagnostics_privacy_level": "strict"
+  },
+  "metadata": {
+    "displayName": "Vendor base policy",
+    "description": "Exact parity with config/default.toml at product inception"
+  },
+  "signature": {
+    "keyId": "development-policy-2026",
+    "algorithm": "Ed25519",
+    "signature": "+2ybb6TVsHwXIODrv+CCN0bZQd9kg7HQEA3VfOZXjIwsroJbf5bOlvawvh7j6iqgVDwpWhOO3pMTSUO/UHasAQ=="
+  }
+}

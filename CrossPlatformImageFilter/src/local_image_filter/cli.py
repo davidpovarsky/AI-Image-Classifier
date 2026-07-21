@@ -17,6 +17,14 @@ from .cache.store import AnalysisCache
 from .config import ConfigurationError, Settings, load_settings
 from .diagnostics.logger import DiagnosticsLogger
 from .inference.model_metadata import RuntimeManifest
+from .policy.bundle import (
+    VerificationContext,
+    apply_verified_policy,
+    load_policy_json,
+    load_trusted_keys,
+    verify_policy_bundle,
+)
+from .policy.engine import PolicyEngine
 from .runtime.container import build_runtime
 
 
@@ -64,6 +72,20 @@ def _parser() -> argparse.ArgumentParser:
     diagnostics_subcommands = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
     summary = diagnostics_subcommands.add_parser("summary")
     common(summary)
+
+    policy = subparsers.add_parser("policy", help="Inspect and verify signed policy bundles")
+    policy_subcommands = policy.add_subparsers(dest="policy_command", required=True)
+    for name in ("inspect", "verify", "effective", "simulate"):
+        command = policy_subcommands.add_parser(name)
+        common(command)
+        command.add_argument("bundle")
+        command.add_argument("--trusted-keys", required=name != "inspect")
+        command.add_argument("--device-id")
+        command.add_argument("--minimum-revision", type=int, default=0)
+        command.add_argument("--engine-version", default="0.1.0")
+        command.add_argument("--product-version", default="0.1.0")
+        if name == "simulate":
+            command.add_argument("--evidence", required=True)
     return parser
 
 
@@ -92,8 +114,9 @@ def _find_mitmdump() -> str | None:
 def _run(args: argparse.Namespace) -> int:
     settings = _settings(args)
     proxy = settings.section("proxy")
-    executable = _find_mitmdump()
-    if executable is None:
+    packaged = bool(getattr(sys, "frozen", False))
+    executable = None if packaged else _find_mitmdump()
+    if not packaged and executable is None:
         print(
             "mitmdump was not found. Install this package in the active environment.",
             file=sys.stderr,
@@ -104,7 +127,6 @@ def _run(args: argparse.Namespace) -> int:
     port = args.listen_port or int(proxy.get("listen_port", 8080))
     mode = _validate_mode(args.mode or str(proxy.get("mode", "regular")))
     command = [
-        executable,
         "--listen-host",
         host,
         "--listen-port",
@@ -121,6 +143,19 @@ def _run(args: argparse.Namespace) -> int:
     command.extend(["--set", "connection_strategy=lazy", "-s", str(addon)])
     command.extend(args.mitm_args)
     print(f"Starting local image filter at {host}:{port} in {mode} mode")
+    if packaged:
+        from mitmproxy.tools.main import mitmdump
+
+        previous_environment = os.environ.copy()
+        try:
+            os.environ.clear()
+            os.environ.update(environment)
+            return int(mitmdump(command) or 0)
+        finally:
+            os.environ.clear()
+            os.environ.update(previous_environment)
+    assert executable is not None
+    command.insert(0, executable)
     return subprocess.run(command, env=environment, check=False).returncode
 
 
@@ -286,6 +321,70 @@ def _cache(settings: Settings) -> AnalysisCache:
     )
 
 
+def _verified_policy(args: argparse.Namespace) -> tuple[dict[str, Any], Settings]:
+    bundle = load_policy_json(Path(args.bundle))
+    verified = verify_policy_bundle(
+        bundle,
+        VerificationContext(
+            trusted_keys=load_trusted_keys(Path(args.trusted_keys)),
+            engine_version=args.engine_version,
+            product_version=args.product_version,
+            device_id=args.device_id,
+            minimum_revision=args.minimum_revision,
+        ),
+    )
+    return verified, apply_verified_policy(_settings(args), verified)
+
+
+def _policy_command(args: argparse.Namespace) -> int:
+    if args.policy_command == "inspect":
+        bundle = load_policy_json(Path(args.bundle))
+        summary = {
+            key: bundle.get(key)
+            for key in (
+                "schemaVersion",
+                "policyId",
+                "revision",
+                "channel",
+                "issuedAt",
+                "expiresAt",
+                "minimumEngineVersion",
+                "minimumProductVersion",
+                "subject",
+                "metadata",
+                "signature",
+            )
+        }
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
+
+    bundle, settings = _verified_policy(args)
+    if args.policy_command == "verify":
+        result: dict[str, Any] = {
+            "valid": True,
+            "policyId": bundle["policyId"],
+            "revision": bundle["revision"],
+        }
+    elif args.policy_command == "effective":
+        result = {
+            "policy": settings.section("policy"),
+            "processing": settings.section("processing"),
+            "signedPolicy": settings.section("signed_policy"),
+        }
+    else:
+        evidence = load_policy_json(Path(args.evidence), maximum_bytes=4_194_304)
+        result = (
+            PolicyEngine(
+                settings.section("policy"),
+                fail_action=str(settings.section("proxy").get("fail_action", "replace")),
+            )
+            .evaluate(evidence)
+            .to_dict()
+        )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
 def main() -> None:
     args = _parser().parse_args()
     try:
@@ -326,6 +425,8 @@ def main() -> None:
             )
             print(json.dumps(logger.summary(), indent=2, ensure_ascii=False))
             code = 0
+        elif args.command == "policy":
+            code = _policy_command(args)
         else:
             raise AssertionError(args.command)
     except (ConfigurationError, OSError, ValueError) as error:
