@@ -96,7 +96,20 @@ local-image-filter print-config
 local-image-filter cache stats|clear
 local-image-filter models inspect|verify
 local-image-filter diagnostics summary
+local-image-filter policy inspect|verify|effective|simulate
 ```
+
+## Commercial desktop edition
+
+The production-oriented Tauri UI, Rust supervisor and IPC crates, signed-policy
+client, licensing boundary, control-plane reference service, installer sources,
+and manual release workflows live under [`product/`](product/README.md). They are
+additive and do not move or duplicate the existing inference adapters.
+
+Unsigned development artifacts can be built without commercial credentials.
+Public redistribution remains blocked until every bundled model has a signed,
+hash-matched approval and the platform signing, updater, TUF-root, and
+notarization credentials have been provisioned.
 
 Configuration precedence is `--config`, then `LOCAL_IMAGE_FILTER_CONFIG`, then
 the default TOML embedded in the wheel. Relative paths resolve against

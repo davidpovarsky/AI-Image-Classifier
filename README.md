@@ -121,3 +121,6 @@ generated model. This is not legal advice.
 ## Desktop image filter
 
 See [CrossPlatformImageFilter](CrossPlatformImageFilter/README.md).
+The additive commercial desktop workspace, privileged-service boundaries,
+installer sources, and credential-gated release process are documented in
+[the commercial product guide](CrossPlatformImageFilter/product/README.md).

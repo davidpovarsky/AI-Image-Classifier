@@ -50,3 +50,9 @@ __pycache__/
 
 # Environment
 .env
+
+# Commercial desktop generated dependencies and build products
+**/node_modules/
+**/target/
+**/dist/
+CrossPlatformImageFilter/product/apps/desktop/src-tauri/gen/
