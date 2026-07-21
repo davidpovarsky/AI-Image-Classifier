@@ -1,0 +1,25 @@
+[package]
+name = "local-image-filter-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "supervisor"
+path = "src/main.rs"
+
+[dependencies]
+interprocess.workspace = true
+ctrlc.workspace = true
+secure-storage = { path = "../../crates/secure-storage" }
+serde.workspace = true
+serde_json.workspace = true
+supervisor-ipc = { path = "../../crates/supervisor-ipc" }
+time.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring.workspace = true
+windows-service.workspace = true
