@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+if [ "${1:-}" = remove ]; then
+  test -r /var/lib/local-ai-image-filter/uninstall-authorization.token
+  /opt/local-ai-image-filter/bin/filterctl prepare-uninstall \
+    --authorization-file /var/lib/local-ai-image-filter/uninstall-authorization.token
+  systemctl disable --now local-ai-image-filter.service
+fi

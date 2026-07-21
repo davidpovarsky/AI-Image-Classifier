@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+if ! getent group local-image-filter-clients >/dev/null; then groupadd --system local-image-filter-clients; fi
+if ! getent passwd local-image-filter >/dev/null; then
+  useradd --system --gid local-image-filter-clients --home-dir /var/lib/local-ai-image-filter --shell /usr/sbin/nologin local-image-filter
+fi
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+  usermod -a -G local-image-filter-clients "$SUDO_USER"
+fi
+systemctl daemon-reload
+systemctl enable --now local-ai-image-filter.service
+# Capture remains disabled until the administrator completes onboarding.

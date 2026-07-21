@@ -1,0 +1,8 @@
+:root { font-family: system-ui, sans-serif; color: #102030; background: #f3f7f9; }
+body { margin: 0; }
+main { max-width: 900px; margin: 5rem auto; padding: 2rem; }
+.eyebrow { color: #176b63; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
+section { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 2rem; }
+button { padding: 1rem; border-radius: .75rem; border: 1px solid #9fb7c3; background: white; text-align: start; }
+button:focus-visible { outline: 3px solid #168b7e; }
+@media (max-width: 640px) { main { margin: 1rem; padding: 1rem; } section { grid-template-columns: 1fr; } }

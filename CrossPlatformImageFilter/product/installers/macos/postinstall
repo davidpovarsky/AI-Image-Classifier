@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+install -d -o root -g wheel -m 0700 "/Library/Application Support/LocalAIImageFilter"
+# The signed app registers its bundled LaunchDaemon with SMAppService. Capture
+# and CA trust remain disabled until authenticated onboarding and explicit consent.

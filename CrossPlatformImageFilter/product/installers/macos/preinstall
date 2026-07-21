@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+# SMAppService owns registration and upgrade coordination for the bundled
+# LaunchDaemon. The package script never bootstraps or unloads it behind the
+# supervisor's network-recovery transaction.
+exit 0

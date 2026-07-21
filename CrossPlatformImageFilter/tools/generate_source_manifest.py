@@ -13,8 +13,11 @@ EXCLUDED_PARTS = {
     ".venv",
     ".wheel-test",
     "__pycache__",
+    "node_modules",
+    "target",
 }
 EXCLUDED_ROOT_PARTS = {"build", "diagnostics", "dist", "logs", "reports"}
+EXCLUDED_ANYWHERE_PARTS = {"dist", "gen"}
 EXCLUDED_NAMES = {"MANIFEST.sha256", "runtime-manifest.json", "cache.sqlite3"}
 EXCLUDED_SUFFIXES = {".onnx", ".npz", ".pt", ".pyc"}
 
@@ -22,6 +25,8 @@ EXCLUDED_SUFFIXES = {".onnx", ".npz", ".pt", ".pyc"}
 def included(path: Path, root: Path) -> bool:
     relative = path.relative_to(root)
     if any(part in EXCLUDED_PARTS or part.endswith(".egg-info") for part in relative.parts):
+        return False
+    if any(part in EXCLUDED_ANYWHERE_PARTS for part in relative.parts):
         return False
     if relative.parts and relative.parts[0] in EXCLUDED_ROOT_PARTS:
         return False

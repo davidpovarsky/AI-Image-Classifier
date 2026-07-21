@@ -1,0 +1,69 @@
+name: Publish signed policy
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_path:
+        description: Repository path to a signed policy bundle
+        required: true
+        type: string
+      channel:
+        description: TUF policy channel
+        required: true
+        type: choice
+        options: [stable, beta]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    environment: policy-production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Verify policy and publish through the KMS-backed control plane
+        shell: bash
+        env:
+          POLICY_TRUSTED_KEYS_JSON: ${{ secrets.POLICY_TRUSTED_KEYS_JSON }}
+          POLICY_PUBLISH_ENDPOINT: ${{ secrets.POLICY_PUBLISH_ENDPOINT }}
+          POLICY_PUBLISH_TOKEN: ${{ secrets.POLICY_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$POLICY_TRUSTED_KEYS_JSON" || { echo 'Missing POLICY_TRUSTED_KEYS_JSON' >&2; exit 1; }
+          test -n "$POLICY_PUBLISH_ENDPOINT" || { echo 'Missing POLICY_PUBLISH_ENDPOINT' >&2; exit 1; }
+          test -n "$POLICY_PUBLISH_TOKEN" || { echo 'Missing POLICY_PUBLISH_TOKEN' >&2; exit 1; }
+          case "$POLICY_PUBLISH_ENDPOINT" in https://*) ;; *) echo 'POLICY_PUBLISH_ENDPOINT must use HTTPS' >&2; exit 1;; esac
+          case "${{ inputs.policy_path }}" in CrossPlatformImageFilter/product/policy/fixtures/*) ;; *) echo 'Policy path must be inside the reviewed fixtures directory' >&2; exit 1;; esac
+          printf '%s' "$POLICY_TRUSTED_KEYS_JSON" > "$RUNNER_TEMP/trusted-keys.json"
+          python -m pip install -e CrossPlatformImageFilter
+          local-image-filter policy verify "${{ inputs.policy_path }}" \
+            --trusted-keys "$RUNNER_TEMP/trusted-keys.json" \
+            --engine-version 0.1.0 --product-version 0.1.0
+          python - <<'PY' > "$RUNNER_TEMP/publish-request.json"
+          import base64, json, os, pathlib
+          path = pathlib.Path('${{ inputs.policy_path }}')
+          print(json.dumps({
+              'channel': '${{ inputs.channel }}',
+              'targetPath': f"policies/channels/${{ inputs.channel }}/policy-bundle.json",
+              'policyBundleBase64': base64.b64encode(path.read_bytes()).decode('ascii'),
+          }))
+          PY
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --header "Authorization: Bearer $POLICY_PUBLISH_TOKEN" \
+            --data-binary "@$RUNNER_TEMP/publish-request.json" \
+            "$POLICY_PUBLISH_ENDPOINT/v1/admin/policies/publish" \
+            --output "$RUNNER_TEMP/publish-response.json"
+          python - <<'PY'
+          import json, os, pathlib
+          response = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'publish-response.json').read_text())
+          required = {'targetVersion', 'snapshotVersion', 'timestampVersion', 'targetSha256'}
+          missing = required.difference(response)
+          assert not missing, f'Publication response omitted: {sorted(missing)}'
+          PY

@@ -1,0 +1,355 @@
+name: Commercial desktop CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22.17.0"
+  RUST_TOOLCHAIN: "1.92.0"
+
+jobs:
+  source-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify source isolation, generated manifests, and release gate defaults
+        shell: bash
+        run: |
+          set -euo pipefail
+          python CrossPlatformImageFilter/tools/generate_source_manifest.py --check
+          python CrossPlatformImageFilter/product/scripts/scan_repository_secrets.py
+          test -f CrossPlatformImageFilter/product/Cargo.lock
+          test -f CrossPlatformImageFilter/product/pnpm-lock.yaml
+          ! find CrossPlatformImageFilter/product -type f \( -name '*.onnx' -o -name '*.pt' -o -name '*.npz' \) -print -quit | grep -q .
+          python - <<'PY'
+          import json, pathlib
+          path = pathlib.Path('CrossPlatformImageFilter/product/legal/model-distribution-approval.example.json')
+          value = json.loads(path.read_text())
+          assert value['approvalId'] == 'EXAMPLE-NOT-AN-APPROVAL'
+          assert all(item['commercialRedistributionApproved'] is False for item in value['models'])
+          PY
+
+  python-quality:
+    needs: source-integrity
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: CrossPlatformImageFilter/pyproject.toml
+      - name: Compile, lint, type-check, test, and build wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e 'CrossPlatformImageFilter[dev]'
+          cd CrossPlatformImageFilter
+          python -m compileall -q src tools product/engine product/scripts
+          python -m ruff check .
+          python -m ruff format --check .
+          python -m mypy src
+          python -m pytest -q --junitxml="reports-commercial-python-${{ runner.os }}.xml"
+          python -m build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: commercial-python-${{ runner.os }}
+          path: |
+            CrossPlatformImageFilter/reports-commercial-python-${{ runner.os }}.xml
+            CrossPlatformImageFilter/dist/
+          if-no-files-found: warn
+          retention-days: 14
+
+  rust-quality:
+    needs: source-integrity
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: CrossPlatformImageFilter/product
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install pinned stable Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - name: Format, lint, and test Rust workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" fmt --all -- --check
+          cargo +"$RUST_TOOLCHAIN" clippy --workspace --all-targets --locked -- -D warnings
+          cargo +"$RUST_TOOLCHAIN" test --workspace --locked
+          cargo +"$RUST_TOOLCHAIN" metadata --locked --format-version 1 > "rust-metadata-${{ runner.os }}.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-rust-${{ runner.os }}
+          path: CrossPlatformImageFilter/product/rust-metadata-${{ runner.os }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend:
+    needs: source-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: CrossPlatformImageFilter/product
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: CrossPlatformImageFilter/product/pnpm-lock.yaml
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.9.0
+          run_install: false
+      - name: Install, lint, type-check, test, and build frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+          pnpm build
+          pnpm list --recursive --json > frontend-dependencies.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-frontend
+          path: |
+            CrossPlatformImageFilter/product/apps/desktop/dist/
+            CrossPlatformImageFilter/product/apps/admin-console/dist/
+            CrossPlatformImageFilter/product/frontend-dependencies.json
+          if-no-files-found: error
+          retention-days: 14
+
+  engine-package:
+    needs: python-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: CrossPlatformImageFilter/pyproject.toml
+      - name: Build self-contained onedir engine and smoke-test CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e 'CrossPlatformImageFilter[package]'
+          cd CrossPlatformImageFilter
+          python product/engine/build_engine.py
+          python -m pip freeze > build/product-engine/dependencies.txt
+          python - <<'PY'
+          import hashlib, pathlib
+          root = pathlib.Path('build/product-engine')
+          lines = []
+          for path in sorted(item for item in root.rglob('*') if item.is_file()):
+              lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}")
+          (root / 'SHA256SUMS').write_text('\n'.join(lines) + '\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: filter-engine-${{ runner.os }}
+          path: CrossPlatformImageFilter/build/product-engine/
+          if-no-files-found: error
+          retention-days: 14
+
+  desktop-binary:
+    needs: [rust-quality, frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: CrossPlatformImageFilter/product
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: CrossPlatformImageFilter/product/pnpm-lock.yaml
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.9.0
+          run_install: false
+      - name: Install Linux Tauri prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Build unsigned Tauri binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          pnpm install --frozen-lockfile
+          pnpm --filter @local-image-filter/desktop tauri build --no-bundle
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-binary-${{ runner.os }}
+          path: CrossPlatformImageFilter/product/target/release/local-image-filter-desktop*
+          if-no-files-found: error
+          retention-days: 14
+
+  supervisor-binary:
+    needs: rust-quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: CrossPlatformImageFilter/product
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build release supervisor and filterctl
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          cargo +"$RUST_TOOLCHAIN" build --release --locked \
+            -p local-image-filter-supervisor --bin supervisor --bin filterctl
+          mkdir -p service-artifacts
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            cp target/release/supervisor.exe target/release/filterctl.exe service-artifacts/
+          else
+            cp target/release/supervisor target/release/filterctl service-artifacts/
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-supervisor-${{ runner.os }}
+          path: CrossPlatformImageFilter/product/service-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  unsigned-package:
+    needs: [engine-package, desktop-binary, supervisor-binary]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runner_name: Windows
+            platform: windows
+            suffix: .exe
+          - os: macos-latest
+            runner_name: macOS
+            platform: macos
+            suffix: ""
+          - os: ubuntu-latest
+            runner_name: Linux
+            platform: linux
+            suffix: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: filter-engine-${{ matrix.runner_name }}
+          path: package-inputs/engine
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-binary-${{ matrix.runner_name }}
+          path: package-inputs/desktop
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: commercial-supervisor-${{ matrix.runner_name }}
+          path: package-inputs/service
+      - name: Assemble explicitly unsigned internal product package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python CrossPlatformImageFilter/product/scripts/build_unsigned_package.py \
+            --platform "${{ matrix.platform }}" \
+            --engine-directory package-inputs/engine/filter-engine \
+            --desktop "package-inputs/desktop/local-image-filter-desktop${{ matrix.suffix }}" \
+            --supervisor "package-inputs/service/supervisor${{ matrix.suffix }}" \
+            --filterctl "package-inputs/service/filterctl${{ matrix.suffix }}" \
+            --output-directory unsigned-package
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-package-${{ matrix.runner_name }}
+          path: unsigned-package/
+          if-no-files-found: error
+          retention-days: 14
+
+  reports:
+    needs: [source-integrity, python-quality, rust-quality, frontend, engine-package, desktop-binary, supervisor-binary, unsigned-package]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: "*"
+          path: reports
+          merge-multiple: false
+      - name: Build consolidated checksums and job report
+        shell: bash
+        env:
+          SOURCE: ${{ needs.source-integrity.result }}
+          PYTHON: ${{ needs.python-quality.result }}
+          RUST: ${{ needs.rust-quality.result }}
+          FRONTEND: ${{ needs.frontend.result }}
+          ENGINE: ${{ needs.engine-package.result }}
+          DESKTOP: ${{ needs.desktop-binary.result }}
+          SUPERVISOR: ${{ needs.supervisor-binary.result }}
+          PACKAGE: ${{ needs.unsigned-package.result }}
+        run: |
+          set -euo pipefail
+          find reports -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          args=()
+          while IFS= read -r path; do args+=(--cargo-metadata "$path"); done < <(find reports -name 'rust-metadata-*.json' -type f)
+          while IFS= read -r path; do args+=(--python-freeze "$path"); done < <(find reports -name 'dependencies.txt' -type f)
+          while IFS= read -r path; do args+=(--pnpm-list "$path"); done < <(find reports -name 'frontend-dependencies.json' -type f)
+          python CrossPlatformImageFilter/product/scripts/generate_sbom.py "${args[@]}" --output SBOM.cdx.json
+          printf '{"source":"%s","python":"%s","rust":"%s","frontend":"%s","engine":"%s","desktop":"%s","supervisor":"%s","package":"%s"}\n' "$SOURCE" "$PYTHON" "$RUST" "$FRONTEND" "$ENGINE" "$DESKTOP" "$SUPERVISOR" "$PACKAGE" > job-results.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-desktop-reports
+          path: |
+            reports/
+            SHA256SUMS
+            job-results.json
+            SBOM.cdx.json
+          if-no-files-found: error
+          retention-days: 14

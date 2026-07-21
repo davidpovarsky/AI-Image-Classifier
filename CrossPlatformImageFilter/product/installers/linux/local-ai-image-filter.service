@@ -1,0 +1,39 @@
+[Unit]
+Description=Local AI Image Filter Supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=local-image-filter
+Group=local-image-filter-clients
+RuntimeDirectory=local-ai-image-filter
+RuntimeDirectoryMode=0750
+StateDirectory=local-ai-image-filter
+StateDirectoryMode=0700
+ExecStart=/opt/local-ai-image-filter/bin/supervisor --service
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/local-ai-image-filter /run/local-ai-image-filter
+
+[Install]
+WantedBy=multi-user.target

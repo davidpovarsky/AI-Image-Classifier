@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Local AI Image Filter">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123f5a"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="url(#background)"/>
+  <path d="M512 176 800 288v208c0 177-117 296-288 352C341 792 224 673 224 496V288z" fill="#61d4bd"/>
+  <rect x="326" y="350" width="372" height="280" rx="48" fill="#10283b"/>
+  <circle cx="438" cy="446" r="54" fill="#70d7ff"/>
+  <path d="m354 574 102-92 74 62 72-70 70 100z" fill="#eef4ff"/>
+  <path d="M310 688h404" stroke="#eef4ff" stroke-width="42" stroke-linecap="round"/>
+</svg>

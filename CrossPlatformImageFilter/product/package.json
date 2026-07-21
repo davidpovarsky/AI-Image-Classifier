@@ -1,0 +1,16 @@
+{
+  "name": "local-ai-image-filter-product",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "pnpm --recursive build",
+    "lint": "pnpm --recursive lint",
+    "test": "pnpm --recursive test",
+    "typecheck": "pnpm --recursive typecheck",
+    "tauri": "pnpm --filter @local-image-filter/desktop tauri"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
