@@ -94,6 +94,10 @@ jobs:
       - name: Install pinned stable Rust toolchain
         shell: bash
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - name: Install Linux Rust workspace prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
       - name: Format, lint, and test Rust workspace
         shell: bash
         run: |
@@ -118,15 +122,15 @@ jobs:
         working-directory: CrossPlatformImageFilter/product
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.9.0
+          run_install: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: CrossPlatformImageFilter/product/pnpm-lock.yaml
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
-        with:
-          version: 11.9.0
-          run_install: false
       - name: Install, lint, type-check, test, and build frontend
         shell: bash
         run: |
@@ -199,15 +203,15 @@ jobs:
         working-directory: CrossPlatformImageFilter/product
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.9.0
+          run_install: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: CrossPlatformImageFilter/product/pnpm-lock.yaml
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
-        with:
-          version: 11.9.0
-          run_install: false
       - name: Install Linux Tauri prerequisites
         if: runner.os == 'Linux'
         shell: bash

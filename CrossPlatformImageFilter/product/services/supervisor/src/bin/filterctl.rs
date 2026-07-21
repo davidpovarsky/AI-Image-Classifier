@@ -14,6 +14,7 @@ use std::{
 use supervisor_ipc::{Envelope, Request, Response, ResponseStatus, read_frame, write_frame};
 use uuid::Uuid;
 
+#[cfg(windows)]
 const SOCKET_NAME: &str = "local-ai-image-filter.supervisor.v1";
 #[cfg(unix)]
 const UNIX_SOCKET_PATH: &str = "/var/run/local-ai-image-filter/supervisor.sock";

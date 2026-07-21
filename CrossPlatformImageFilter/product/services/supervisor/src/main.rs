@@ -31,6 +31,7 @@ use uuid::Uuid;
 #[cfg(windows)]
 use widestring::U16CString;
 
+#[cfg(windows)]
 const SOCKET_NAME: &str = "local-ai-image-filter.supervisor.v1";
 #[cfg(unix)]
 const UNIX_SOCKET_PATH: &str = "/var/run/local-ai-image-filter/supervisor.sock";
@@ -504,11 +505,22 @@ fn now_epoch_seconds() -> i64 {
         .map_or(0, |duration| duration.as_secs() as i64)
 }
 
+#[cfg(windows)]
 fn peer_process_id(stream: &Stream) -> u32 {
     stream
         .peer_creds()
         .ok()
         .and_then(|credentials| credentials.pid())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn peer_process_id(stream: &Stream) -> u32 {
+    stream
+        .peer_creds()
+        .ok()
+        .and_then(|credentials| credentials.pid())
+        .and_then(|process_id| u32::try_from(process_id).ok())
         .unwrap_or(0)
 }
 
