@@ -4,10 +4,17 @@ use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
+#[cfg(unix)]
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng, Payload},
+};
 use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(any(windows, unix))]
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -110,46 +117,135 @@ impl SecureStore for DpapiMachineStore {
 }
 
 #[cfg(unix)]
-pub struct OsKeyringStore {
-    service: String,
+pub struct MachineFileStore {
+    directory: PathBuf,
+    cipher: XChaCha20Poly1305,
+    namespace: Vec<u8>,
 }
 
 #[cfg(unix)]
-impl OsKeyringStore {
-    pub fn new(service: String) -> Result<Self, SecureStorageError> {
-        if service.is_empty() || service.len() > 128 {
-            return Err(SecureStorageError::Backend);
+impl MachineFileStore {
+    #[cfg(target_os = "macos")]
+    pub fn new_or_create_key(
+        directory: PathBuf,
+        key_path: &Path,
+        product_namespace: &str,
+    ) -> Result<Self, SecureStorageError> {
+        if !key_path.exists() {
+            let parent = key_path.parent().ok_or(SecureStorageError::Backend)?;
+            fs::create_dir_all(parent).map_err(|_| SecureStorageError::Backend)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .map_err(|_| SecureStorageError::Backend)?;
+            let key = XChaCha20Poly1305::generate_key(&mut AeadOsRng);
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            match options.open(key_path) {
+                Ok(mut file) => {
+                    std::io::Write::write_all(&mut file, &key)
+                        .map_err(|_| SecureStorageError::Backend)?;
+                    file.sync_all().map_err(|_| SecureStorageError::Backend)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(SecureStorageError::Backend),
+            }
         }
-        Ok(Self { service })
+        Self::new(directory, key_path, product_namespace)
     }
 
-    fn entry(&self, name: &str) -> Result<keyring::Entry, SecureStorageError> {
+    pub fn new(
+        directory: PathBuf,
+        key_path: &Path,
+        product_namespace: &str,
+    ) -> Result<Self, SecureStorageError> {
+        if product_namespace.is_empty() || !directory.is_absolute() || !key_path.is_absolute() {
+            return Err(SecureStorageError::Backend);
+        }
+        let key: [u8; 32] = fs::read(key_path)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(SecureStorageError::Backend)?;
+        fs::create_dir_all(&directory).map_err(|_| SecureStorageError::Backend)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|_| SecureStorageError::Backend)?;
+        Ok(Self {
+            directory,
+            cipher: XChaCha20Poly1305::new((&key).into()),
+            namespace: product_namespace.as_bytes().to_vec(),
+        })
+    }
+
+    fn path(&self, name: &str) -> Result<PathBuf, SecureStorageError> {
         if !valid_secret_name(name) {
             return Err(SecureStorageError::Backend);
         }
-        keyring::Entry::new(&self.service, name).map_err(|_| SecureStorageError::Backend)
+        Ok(self.directory.join(format!("{name}.secret")))
+    }
+
+    fn associated_data(&self, name: &str) -> Vec<u8> {
+        let mut value = self.namespace.clone();
+        value.push(0);
+        value.extend_from_slice(name.as_bytes());
+        value
+    }
+
+    fn atomic_write(&self, path: &Path, bytes: &[u8]) -> Result<(), SecureStorageError> {
+        let temporary = path.with_extension("secret.tmp");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .map_err(|_| SecureStorageError::Backend)?;
+        std::io::Write::write_all(&mut file, bytes).map_err(|_| SecureStorageError::Backend)?;
+        file.sync_all().map_err(|_| SecureStorageError::Backend)?;
+        fs::rename(temporary, path).map_err(|_| SecureStorageError::Backend)
     }
 }
 
 #[cfg(unix)]
-impl SecureStore for OsKeyringStore {
+impl SecureStore for MachineFileStore {
     fn put(&self, name: &str, secret: &[u8]) -> Result<(), SecureStorageError> {
-        self.entry(name)?
-            .set_secret(secret)
-            .map_err(|_| SecureStorageError::Backend)
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut AeadOsRng);
+        let encrypted = self
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: secret,
+                    aad: &self.associated_data(name),
+                },
+            )
+            .map_err(|_| SecureStorageError::Backend)?;
+        let mut stored = nonce.to_vec();
+        stored.extend_from_slice(&encrypted);
+        self.atomic_write(&self.path(name)?, &stored)
     }
 
     fn get(&self, name: &str) -> Result<Option<Vec<u8>>, SecureStorageError> {
-        match self.entry(name)?.get_secret() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(SecureStorageError::Backend),
+        let stored = match fs::read(self.path(name)?) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(SecureStorageError::Backend),
+        };
+        if stored.len() < 24 {
+            return Err(SecureStorageError::Backend);
         }
+        let (nonce, encrypted) = stored.split_at(24);
+        self.cipher
+            .decrypt(
+                XNonce::from_slice(nonce),
+                Payload {
+                    msg: encrypted,
+                    aad: &self.associated_data(name),
+                },
+            )
+            .map(Some)
+            .map_err(|_| SecureStorageError::Backend)
     }
 
     fn delete(&self, name: &str) -> Result<(), SecureStorageError> {
-        match self.entry(name)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        match fs::remove_file(self.path(name)?) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(SecureStorageError::Backend),
         }
     }
@@ -255,5 +351,44 @@ mod tests {
         assert!(valid_secret_name("device-private-key"));
         assert!(!valid_secret_name("../device-private-key"));
         assert!(!valid_secret_name("directory/name"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_store_encrypts_at_rest_and_rejects_tampering() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "local-filter-secure-store-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let key_path = root.join("machine.key");
+        fs::write(&key_path, [9_u8; 32]).unwrap();
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let secrets = root.join("secrets");
+        let store = MachineFileStore::new(secrets.clone(), &key_path, "test.namespace").unwrap();
+        store.put("license-key", b"commercial-secret").unwrap();
+        let stored_path = secrets.join("license-key.secret");
+        let stored = fs::read(&stored_path).unwrap();
+        assert!(
+            !stored
+                .windows(17)
+                .any(|value| value == b"commercial-secret")
+        );
+        assert_eq!(
+            store.get("license-key").unwrap().unwrap(),
+            b"commercial-secret"
+        );
+        let mut tampered = stored;
+        *tampered.last_mut().unwrap() ^= 1;
+        fs::write(&stored_path, tampered).unwrap();
+        assert!(matches!(
+            store.get("license-key"),
+            Err(SecureStorageError::Backend)
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }

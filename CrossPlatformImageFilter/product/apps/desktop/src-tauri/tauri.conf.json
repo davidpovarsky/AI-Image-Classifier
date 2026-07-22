@@ -35,12 +35,7 @@
     "category": "Utility",
     "macOS": {
       "minimumSystemVersion": "26.0",
-      "hardenedRuntime": true,
-      "files": {
-        "Library/LaunchDaemons/com.localimagefilter.supervisor.plist": "../../../installers/macos/com.localimagefilter.supervisor.plist",
-        "Library/LaunchServices/supervisor": "../../../target/release/supervisor",
-        "Library/LaunchServices/filterctl": "../../../target/release/filterctl"
-      }
+      "hardenedRuntime": true
     },
     "shortDescription": "Local on-device image filtering",
     "longDescription": "Commercial desktop controller for the Local AI Image Filter supervisor service."
@@ -50,7 +45,7 @@
       "active": true,
       "dialog": false,
       "endpoints": ["https://updates.localimagefilter.example/v1/{{target}}/{{arch}}/{{current_version}}"],
-      "pubkey": "PRODUCTION_UPDATER_PUBLIC_KEY_REQUIRED"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3M0UwQTI1RjY1Qzc3MTIKUldRU2QxejJKUW8rOStlVUhoYk1LSDByVGVtTHJRait0a1duQmRFMnlzWU83eENxdXl3THQwY3oK"
     }
   }
 }

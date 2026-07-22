@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from local_image_filter.cli import _parser, _settings
 from local_image_filter.config import load_settings
 from local_image_filter.policy.bundle import (
     PolicyBundleError,
@@ -86,6 +87,11 @@ def test_signature_unknown_key_and_unsupported_algorithm_are_rejected() -> None:
         ({"issuedAt": "2026-07-23T00:00:00Z"}, {}, "not yet valid"),
         ({"revision": 2}, {"minimum_revision": 3}, "rollback"),
         (
+            {"subject": {"type": "tenant", "id": "tenant-a"}},
+            {"tenant_id": "tenant-b"},
+            "tenant ID",
+        ),
+        (
             {"subject": {"type": "device", "id": "device-a"}},
             {"device_id": "device-b"},
             "device ID",
@@ -142,3 +148,48 @@ def test_expiration_boundary_is_fail_closed() -> None:
         expiresAt=(now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
     )
     assert verify_policy_bundle(bundle, context(now=now))["revision"] == 1
+
+
+def test_active_policy_precedence_is_vendor_tenant_device(tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted.json"
+    trusted.write_text(
+        json.dumps({"keys": {"test": base64.b64encode(PUBLIC_KEY).decode()}}),
+        encoding="utf-8",
+    )
+    bundles: list[Path] = []
+    for index, (kind, identifier, score) in enumerate(
+        (
+            ("vendor-global", "vendor", 0.11),
+            ("tenant", "tenant-a", 0.22),
+            ("device", "device-a", 0.33),
+        )
+    ):
+        policy = signed_bundle()["policy"]
+        policy["woman_min_score"] = score
+        path = tmp_path / f"{index}.json"
+        path.write_text(
+            json.dumps(
+                signed_bundle(
+                    revision=index + 1,
+                    subject={"type": kind, "id": identifier},
+                    policy=policy,
+                )
+            ),
+            encoding="utf-8",
+        )
+        bundles.append(path)
+    arguments = [
+        "print-config",
+        "--config",
+        str(ROOT / "config/mock.toml"),
+        "--active-policy-trusted-keys",
+        str(trusted),
+        "--active-policy-tenant-id",
+        "tenant-a",
+        "--active-policy-device-id",
+        "device-a",
+    ]
+    for bundle in bundles:
+        arguments.extend(("--active-policy-bundle", str(bundle)))
+    settings = _settings(_parser().parse_args(arguments))
+    assert settings.section("policy")["woman_min_score"] == 0.33

@@ -49,20 +49,30 @@ export async function adminRequest<T>(
   accessToken: string,
   operation: AdminOperation,
   payload: Record<string, unknown>,
+  developmentTenant?: string,
 ): Promise<T> {
   if (!accessToken) throw new Error("An OIDC access token is required");
   assertPrivacySafePayload(payload);
   const base = validateControlPlaneOrigin(origin, import.meta.env.DEV);
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${accessToken}`,
+    "content-type": "application/json",
+  };
+  if (import.meta.env.DEV) {
+    if (!developmentTenant) throw new Error("A development tenant ID is required");
+    headers["x-development-subject"] = accessToken;
+    headers["x-development-tenant"] = developmentTenant;
+  }
   const response = await fetch(new URL(`/v1/admin/${operation}`, base), {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
+    headers,
     body: JSON.stringify(payload),
     credentials: "omit",
     redirect: "error",
   });
-  if (!response.ok) throw new Error(`Administrative request failed (${String(response.status)})`);
+  if (!response.ok) {
+    const problem = await response.json().catch(() => undefined) as { error?: { code?: string } } | undefined;
+    throw new Error(problem?.error?.code ?? `Administrative request failed (${String(response.status)})`);
+  }
   return response.json() as Promise<T>;
 }

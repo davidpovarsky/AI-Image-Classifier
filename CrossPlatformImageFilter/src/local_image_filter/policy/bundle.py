@@ -197,6 +197,7 @@ class VerificationContext:
     trusted_keys: dict[str, bytes]
     engine_version: str
     product_version: str
+    tenant_id: str | None = None
     device_id: str | None = None
     minimum_revision: int = 0
     now: datetime | None = None
@@ -245,6 +246,8 @@ def verify_policy_bundle(bundle: dict[str, Any], context: VerificationContext) -
         raise PolicyBundleError("subject.type is unsupported")
     if not isinstance(subject_id, str) or SAFE_IDENTIFIER.fullmatch(subject_id) is None:
         raise PolicyBundleError("subject.id is invalid")
+    if subject_type == "tenant" and subject_id != context.tenant_id:
+        raise PolicyBundleError("Policy tenant ID does not match this tenant")
     if subject_type == "device" and subject_id != context.device_id:
         raise PolicyBundleError("Policy device ID does not match this device")
 

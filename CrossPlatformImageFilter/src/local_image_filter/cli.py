@@ -35,6 +35,11 @@ def _parser() -> argparse.ArgumentParser:
     def common(command: argparse.ArgumentParser) -> None:
         command.add_argument("--config")
         command.add_argument("--overlay", action="append", default=[])
+        command.add_argument("--active-policy-bundle", action="append", default=[])
+        command.add_argument("--active-policy-trusted-keys")
+        command.add_argument("--active-policy-tenant-id")
+        command.add_argument("--active-policy-device-id")
+        command.add_argument("--active-policy-minimum-revision", type=int, default=0)
 
     run = subparsers.add_parser("run", help="Start mitmproxy with the image-filter addon")
     common(run)
@@ -81,17 +86,71 @@ def _parser() -> argparse.ArgumentParser:
         common(command)
         command.add_argument("bundle")
         command.add_argument("--trusted-keys", required=name != "inspect")
+        command.add_argument("--tenant-id")
         command.add_argument("--device-id")
         command.add_argument("--minimum-revision", type=int, default=0)
         command.add_argument("--engine-version", default="0.1.0")
         command.add_argument("--product-version", default="0.1.0")
         if name == "simulate":
             command.add_argument("--evidence", required=True)
+    refresh = policy_subcommands.add_parser("refresh")
+    common(refresh)
+    refresh.add_argument("--metadata-directory", required=True)
+    refresh.add_argument("--target-directory", required=True)
+    refresh.add_argument("--metadata-base-url", required=True)
+    refresh.add_argument("--target-base-url", required=True)
+    refresh.add_argument("--bootstrap-root", required=True)
+    refresh.add_argument("--allowed-origin", action="append", required=True)
+    refresh.add_argument("--target-path", required=True)
+    refresh.add_argument("--trusted-keys", required=True)
+    refresh.add_argument("--tenant-id")
+    refresh.add_argument("--device-id")
+    refresh.add_argument("--minimum-revision", type=int, default=0)
+    refresh.add_argument("--engine-version", default="0.1.0")
+    refresh.add_argument("--product-version", default="0.1.0")
+    refresh.add_argument("--policy-store", required=True)
     return parser
 
 
 def _settings(args: argparse.Namespace) -> Settings:
-    return load_settings(getattr(args, "config", None), getattr(args, "overlay", []))
+    settings = load_settings(getattr(args, "config", None), getattr(args, "overlay", []))
+    bundles = [Path(value) for value in getattr(args, "active_policy_bundle", [])]
+    if not bundles:
+        return settings
+    trusted_path = getattr(args, "active_policy_trusted_keys", None)
+    if not trusted_path:
+        raise ConfigurationError("active signed policies require trusted policy keys")
+    trusted_keys = load_trusted_keys(Path(trusted_path))
+    tenant_id = getattr(args, "active_policy_tenant_id", None)
+    device_id = getattr(args, "active_policy_device_id", None)
+    minimum_revision = int(getattr(args, "active_policy_minimum_revision", 0))
+    previous_rank = -1
+    seen_subjects: set[str] = set()
+    ranks = {"vendor-global": 0, "tenant": 1, "device": 2}
+    for bundle_path in bundles:
+        bundle = load_policy_json(bundle_path)
+        verified = verify_policy_bundle(
+            bundle,
+            VerificationContext(
+                trusted_keys=trusted_keys,
+                engine_version="0.1.0",
+                product_version="0.1.0",
+                tenant_id=tenant_id,
+                device_id=device_id,
+                minimum_revision=minimum_revision,
+            ),
+        )
+        subject = verified["subject"]
+        kind = str(subject["type"])
+        rank = ranks.get(kind)
+        if rank is None or rank < previous_rank or kind in seen_subjects:
+            raise ConfigurationError(
+                "active policy bundles must be unique and ordered vendor-global, tenant, device"
+            )
+        previous_rank = rank
+        seen_subjects.add(kind)
+        settings = apply_verified_policy(settings, verified)
+    return settings
 
 
 def _validate_mode(mode: str) -> str:
@@ -335,6 +394,7 @@ def _verified_policy(args: argparse.Namespace) -> tuple[dict[str, Any], Settings
             trusted_keys=load_trusted_keys(Path(args.trusted_keys)),
             engine_version=args.engine_version,
             product_version=args.product_version,
+            tenant_id=args.tenant_id,
             device_id=args.device_id,
             minimum_revision=args.minimum_revision,
         ),
@@ -343,6 +403,47 @@ def _verified_policy(args: argparse.Namespace) -> tuple[dict[str, Any], Settings
 
 
 def _policy_command(args: argparse.Namespace) -> int:
+    if args.policy_command == "refresh":
+        from .policy.tuf_client import AtomicPolicyStore, TufPolicyClient
+
+        bootstrap = Path(args.bootstrap_root).expanduser().resolve().read_bytes()
+        client = TufPolicyClient(
+            metadata_directory=Path(args.metadata_directory),
+            target_directory=Path(args.target_directory),
+            metadata_base_url=args.metadata_base_url,
+            target_base_url=args.target_base_url,
+            bootstrap_root=bootstrap,
+            allowed_origins=frozenset(args.allowed_origin),
+        )
+        verified, content = client.fetch_verified_bundle(
+            args.target_path,
+            context=VerificationContext(
+                trusted_keys=load_trusted_keys(Path(args.trusted_keys)),
+                engine_version=args.engine_version,
+                product_version=args.product_version,
+                tenant_id=args.tenant_id,
+                device_id=args.device_id,
+                minimum_revision=args.minimum_revision,
+            ),
+            base_settings=load_settings(args.config, args.overlay),
+        )
+        store = AtomicPolicyStore(Path(args.policy_store))
+        store.activate(content)
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "policyId": verified["policyId"],
+                    "revision": verified["revision"],
+                    "subject": verified["subject"],
+                    "activePath": str(store.active_path),
+                    "lastKnownGoodPath": str(store.last_known_good_path),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
     if args.policy_command == "inspect":
         bundle = load_policy_json(Path(args.bundle))
         summary = {

@@ -8,6 +8,12 @@ use interprocess::local_socket::{Name, Stream, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use supervisor_ipc::{Envelope, Request, Response, ResponseStatus, read_frame, write_frame};
+use tauri::{
+    Manager,
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+};
+use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 
 #[cfg(windows)]
@@ -44,6 +50,15 @@ pub struct SupportBundle {
     path: String,
     sha256: String,
     bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationUpdateStatus {
+    available: bool,
+    version: Option<String>,
+    notes: Option<String>,
+    published_at: Option<String>,
 }
 
 impl ServiceStatus {
@@ -172,7 +187,7 @@ fn authenticate_administrator(password: String, scope: String) -> Result<String,
     }
     if !matches!(
         scope.as_str(),
-        "stop" | "pause" | "repair" | "uninstall" | "deactivate" | "support"
+        "stop" | "pause" | "repair" | "uninstall" | "deactivate" | "support" | "policy"
     ) {
         return Err("unsupported authorization scope".into());
     }
@@ -187,6 +202,61 @@ fn install_or_repair_certificate(authorization: String) -> Result<ServiceStatus,
 #[tauri::command]
 fn export_support_bundle(authorization: String) -> Result<SupportBundle, String> {
     send_request(Request::ExportSupportBundle { authorization })
+}
+
+#[tauri::command]
+fn apply_policy_assignment(
+    authorization: String,
+    assignment: String,
+) -> Result<ServiceStatus, String> {
+    if authorization.is_empty() || assignment.is_empty() || assignment.len() > 48 * 1024 {
+        return Err("policy assignment or administrator authorization is invalid".into());
+    }
+    send_request(Request::ApplyPolicyAssignment {
+        authorization,
+        assignment,
+    })
+}
+
+#[tauri::command]
+async fn check_application_update(
+    app: tauri::AppHandle,
+) -> Result<ApplicationUpdateStatus, String> {
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(match update {
+        Some(update) => ApplicationUpdateStatus {
+            available: true,
+            version: Some(update.version),
+            notes: update.body,
+            published_at: update.date.map(|value| value.to_string()),
+        },
+        None => ApplicationUpdateStatus {
+            available: false,
+            version: None,
+            notes: None,
+            published_at: None,
+        },
+    })
+}
+
+#[tauri::command]
+async fn install_application_update(app: tauri::AppHandle) -> Result<(), String> {
+    let update = app
+        .updater()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no application update is available".to_owned())?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -240,6 +310,35 @@ fn protected_operation(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            let open = MenuItem::with_id(
+                app,
+                "open",
+                "Open Local AI Image Filter",
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let mut tray = TrayIconBuilder::with_id("main")
+                .menu(&menu)
+                .tooltip("Local AI Image Filter");
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.on_menu_event(|app, event| match event.id.as_ref() {
+                "open" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .build(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             service_status,
             start_protection,
@@ -252,6 +351,9 @@ pub fn run() {
             register_supervisor_service,
             install_or_repair_certificate,
             export_support_bundle,
+            apply_policy_assignment,
+            check_application_update,
+            install_application_update,
             protected_operation
         ])
         .run(tauri::generate_context!())

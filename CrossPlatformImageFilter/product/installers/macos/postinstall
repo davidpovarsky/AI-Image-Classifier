@@ -1,5 +1,11 @@
 #!/bin/sh
 set -eu
 install -d -o root -g wheel -m 0700 "/Library/Application Support/LocalAIImageFilter"
+if [ ! -f "/Library/Application Support/LocalAIImageFilter/secure-store.key" ]; then
+  umask 077
+  head -c 32 /dev/urandom > "/Library/Application Support/LocalAIImageFilter/secure-store.key"
+fi
+chown root:wheel "/Library/Application Support/LocalAIImageFilter/secure-store.key"
+chmod 0600 "/Library/Application Support/LocalAIImageFilter/secure-store.key"
 # The signed app registers its bundled LaunchDaemon with SMAppService. Capture
 # and CA trust remain disabled until authenticated onboarding and explicit consent.

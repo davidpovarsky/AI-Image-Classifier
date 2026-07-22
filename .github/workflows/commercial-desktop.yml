@@ -13,6 +13,9 @@ env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "22.17.0"
   RUST_TOOLCHAIN: "1.92.0"
+  MOBILECLIP_COMMIT: aecfb5453d022e9deff12f81a150ea8f35194baa
+  OPEN_CLIP_COMMIT: 54c9754a94baacac5b2d9b1c76318078d48912af
+  YOLOX_COMMIT: 419778480ab6ec0590e5d3831b3afb3b46ab2aa3
 
 jobs:
   source-integrity:
@@ -39,6 +42,93 @@ jobs:
           assert value['approvalId'] == 'EXAMPLE-NOT-AN-APPROVAL'
           assert all(item['commercialRedistributionApproved'] is False for item in value['models'])
           PY
+
+  export-models:
+    needs: source-integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            tools/MobileCLIPConversion/requirements.txt
+            CrossPlatformImageFilter/pyproject.toml
+      - name: Install the existing pinned model export toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            torch==2.8.0 torchvision==0.23.0 numpy==2.0.2 Pillow==11.3.0 \
+            huggingface_hub==0.34.4 open_clip_torch==3.2.0 timm==1.0.19 \
+            onnx==1.19.0 onnxscript==0.5.6 onnxruntime==1.27.0 \
+            loguru==0.7.3 opencv-python-headless==4.11.0.86 \
+            thop==0.1.1.post2209072238 tabulate==0.9.0
+          git clone https://github.com/apple/ml-mobileclip.git "$RUNNER_TEMP/ml-mobileclip"
+          git -C "$RUNNER_TEMP/ml-mobileclip" checkout --detach "$MOBILECLIP_COMMIT"
+          git clone https://github.com/mlfoundations/open_clip.git "$RUNNER_TEMP/open_clip"
+          git -C "$RUNNER_TEMP/open_clip" checkout --detach "$OPEN_CLIP_COMMIT"
+          git -C "$RUNNER_TEMP/open_clip" apply "$RUNNER_TEMP/ml-mobileclip/mobileclip2/open_clip_inference_only.patch"
+          cp -R "$RUNNER_TEMP/ml-mobileclip/mobileclip2/." "$RUNNER_TEMP/open_clip/src/open_clip/"
+          python -m pip install --no-deps -e "$RUNNER_TEMP/open_clip"
+          git clone https://github.com/Megvii-BaseDetection/YOLOX.git "$RUNNER_TEMP/YOLOX"
+          git -C "$RUNNER_TEMP/YOLOX" checkout --detach "$YOLOX_COMMIT"
+          echo "PYTHONPATH=$RUNNER_TEMP/ml-mobileclip:$RUNNER_TEMP/open_clip/src" >> "$GITHUB_ENV"
+      - name: Acquire, export, and verify pinned real runtime models
+        shell: bash
+        run: |
+          set -euo pipefail
+          models=CrossPlatformImageFilter/models
+          mkdir -p "$models/licenses" CrossPlatformImageFilter/reports/model
+          tools/MobileCLIPConversion/download_model.sh .model-cache/mobileclip2-s2
+          python CrossPlatformImageFilter/tools/model_export/export_mobileclip2_onnx.py \
+            --checkpoint .model-cache/mobileclip2-s2/mobileclip2_s2.pt \
+            --output "$models/mobileclip2_s2_image_encoder.onnx" \
+            --prompts-output "$models/mobileclip2_s2_prompt_embeddings.npz" \
+            --ios-converter tools/MobileCLIPConversion/convert_mobileclip2_s2.py
+          python CrossPlatformImageFilter/tools/model_export/verify_mobileclip_parity.py \
+            --checkpoint .model-cache/mobileclip2-s2/mobileclip2_s2.pt \
+            --onnx "$models/mobileclip2_s2_image_encoder.onnx" \
+            --prompts "$models/mobileclip2_s2_prompt_embeddings.npz" \
+            --ios-converter tools/MobileCLIPConversion/convert_mobileclip2_s2.py \
+            --output CrossPlatformImageFilter/reports/model/mobileclip-parity.json
+          python CrossPlatformImageFilter/tools/model_download/acquire_nudenet.py \
+            --output "$models/nudenet320n.onnx" --licenses "$models/licenses"
+          python CrossPlatformImageFilter/tools/model_download/acquire_yolox.py \
+            --output .model-cache/yolox/yolox_nano.pth
+          python CrossPlatformImageFilter/tools/model_export/export_yolox_onnx.py \
+            --yolox-root "$RUNNER_TEMP/YOLOX" \
+            --checkpoint .model-cache/yolox/yolox_nano.pth \
+            --input-size 416 --output "$models/person_detector.onnx"
+          cp tools/MobileCLIPConversion/MODEL_LICENSE.md "$models/licenses/MobileCLIP2-MODEL-LICENSE.md"
+          cp "$RUNNER_TEMP/YOLOX/LICENSE" "$models/licenses/YOLOX-CODE-LICENSE.txt"
+          python CrossPlatformImageFilter/tools/model_export/build_runtime_manifest.py \
+            --models "$models" --sources "$models/model-sources.json" \
+            --output "$models/runtime-manifest.json" \
+            > CrossPlatformImageFilter/reports/model/runtime-manifest.log
+          python CrossPlatformImageFilter/tools/model_export/verify_onnx_models.py \
+            "$models/mobileclip2_s2_image_encoder.onnx" "$models/nudenet320n.onnx" \
+            "$models/person_detector.onnx" \
+            --prompt-embeddings "$models/mobileclip2_s2_prompt_embeddings.npz" \
+            > CrossPlatformImageFilter/reports/model/model-verification.json
+          cp "$models/runtime-manifest.json" "$models/model-sources.json" CrossPlatformImageFilter/reports/model/
+          cp -R "$models/licenses" CrossPlatformImageFilter/reports/model/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: commercial-real-models
+          path: CrossPlatformImageFilter/models/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: commercial-model-reports
+          path: CrossPlatformImageFilter/reports/model/
+          if-no-files-found: warn
+          retention-days: 14
 
   python-quality:
     needs: source-integrity
@@ -152,7 +242,7 @@ jobs:
           retention-days: 14
 
   engine-package:
-    needs: python-quality
+    needs: [python-quality, export-models]
     strategy:
       fail-fast: false
       matrix:
@@ -166,14 +256,29 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: CrossPlatformImageFilter/pyproject.toml
-      - name: Build self-contained onedir engine and smoke-test CLI
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: commercial-real-models
+          path: CrossPlatformImageFilter/models
+      - name: Build self-contained onedir engine and test packaged real inference
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install -e 'CrossPlatformImageFilter[package]'
           cd CrossPlatformImageFilter
-          python product/engine/build_engine.py
+          python product/engine/build_engine.py --models models
+          engine=build/product-engine/filter-engine/filter-engine
+          if [[ "${{ runner.os }}" == Windows ]]; then engine="$engine.exe"; fi
+          "$engine" doctor --config build/product-engine/filter-engine/config/default.toml --load-models \
+            > build/product-engine/packaged-doctor.json
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+          Image.new('RGB', (640, 480), (90, 120, 150)).save(Path('build/product-engine/real-smoke.jpg'))
+          PY
+          "$engine" classify --config build/product-engine/filter-engine/config/default.toml \
+            build/product-engine/real-smoke.jpg > build/product-engine/packaged-real-classification.json
           python -m pip freeze > build/product-engine/dependencies.txt
           python - <<'PY'
           import hashlib, pathlib
@@ -191,7 +296,7 @@ jobs:
           retention-days: 14
 
   desktop-binary:
-    needs: [rust-quality, frontend]
+    needs: [rust-quality, frontend, engine-package, supervisor-binary]
     strategy:
       fail-fast: false
       matrix:
@@ -215,20 +320,88 @@ jobs:
       - name: Install Linux Tauri prerequisites
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Build unsigned Tauri binary
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: filter-engine-${{ runner.os }}
+          path: CrossPlatformImageFilter/product/bundle-inputs/engine
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: commercial-supervisor-${{ runner.os }}
+          path: CrossPlatformImageFilter/product/bundle-inputs/service
+      - name: Build native unsigned installers and signed internal updater artifacts
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           pnpm install --frozen-lockfile
-          pnpm --filter @local-image-filter/desktop tauri build --no-bundle
+          key="$RUNNER_TEMP/internal-updater.key"
+          pnpm --filter @local-image-filter/desktop tauri signer generate --ci --write-keys "$key" >/dev/null 2>&1
+          case "${{ runner.os }}" in Windows) platform=windows ;; macOS) platform=macos ;; Linux) platform=linux ;; esac
+          python scripts/prepare_tauri_bundle_config.py \
+            --platform "$platform" \
+            --engine-directory bundle-inputs/engine/filter-engine \
+            --service-directory bundle-inputs/service \
+            --updater-public-key "$key.pub" \
+            --output "$RUNNER_TEMP/internal-bundle.json"
+          export TAURI_SIGNING_PRIVATE_KEY="$key"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          pnpm --filter @local-image-filter/desktop tauri build --config "$RUNNER_TEMP/internal-bundle.json"
+          cp "$key.pub" target/release/bundle/internal-updater.pub
+          find target/release/bundle -type f -print
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: desktop-binary-${{ runner.os }}
-          path: CrossPlatformImageFilter/product/target/release/local-image-filter-desktop*
+          path: |
+            CrossPlatformImageFilter/product/target/release/local-image-filter-desktop*
+            CrossPlatformImageFilter/product/target/release/bundle/
           if-no-files-found: error
           retention-days: 14
+
+  native-package-smoke:
+    needs: desktop-binary
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-binary-${{ runner.os }}
+          path: native
+      - name: Verify native installer structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Windows)
+              test -n "$(find native -type f -name '*-setup.exe' -print)"
+              test -n "$(find native -type f -name '*.sig' -print)"
+              ;;
+            macOS)
+              dmg="$(find native -type f -name '*.dmg' -print | sed -n '1p')"
+              test -n "$dmg"
+              hdiutil imageinfo "$dmg" >/dev/null
+              test -n "$(find native -type f -name '*.sig' -print)"
+              ;;
+            Linux)
+              sudo apt-get update
+              sudo apt-get install -y minisign
+              deb="$(find native -type f -name '*.deb' -print | sed -n '1p')"
+              rpm="$(find native -type f -name '*.rpm' -print | sed -n '1p')"
+              test -n "$deb" -a -n "$rpm"
+              dpkg-deb --contents "$deb" | grep -q 'local-ai-image-filter.service'
+              rpm -qpl "$rpm" | grep -q 'local-ai-image-filter.service'
+              test -n "$(find native -type f -name '*.AppImage' -print)"
+              test -n "$(find native -type f -name '*.sig' -print)"
+              signature="$(find native -type f -name '*.sig' -print | sed -n '1p')"
+              test -f "${signature%.sig}"
+              minisign -Vm "${signature%.sig}" -x "$signature" \
+                -p "$(find native -type f -name 'internal-updater.pub' -print | sed -n '1p')"
+              ;;
+          esac
 
   supervisor-binary:
     needs: rust-quality
@@ -319,7 +492,7 @@ jobs:
           retention-days: 14
 
   reports:
-    needs: [source-integrity, python-quality, rust-quality, frontend, engine-package, desktop-binary, supervisor-binary, unsigned-package]
+    needs: [source-integrity, export-models, python-quality, rust-quality, frontend, engine-package, desktop-binary, supervisor-binary, unsigned-package, native-package-smoke]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -334,6 +507,7 @@ jobs:
         shell: bash
         env:
           SOURCE: ${{ needs.source-integrity.result }}
+          MODELS: ${{ needs.export-models.result }}
           PYTHON: ${{ needs.python-quality.result }}
           RUST: ${{ needs.rust-quality.result }}
           FRONTEND: ${{ needs.frontend.result }}
@@ -341,6 +515,7 @@ jobs:
           DESKTOP: ${{ needs.desktop-binary.result }}
           SUPERVISOR: ${{ needs.supervisor-binary.result }}
           PACKAGE: ${{ needs.unsigned-package.result }}
+          NATIVE: ${{ needs.native-package-smoke.result }}
         run: |
           set -euo pipefail
           mkdir -p reports
@@ -350,7 +525,7 @@ jobs:
           while IFS= read -r path; do args+=(--python-freeze "$path"); done < <(find reports -name 'dependencies.txt' -type f)
           while IFS= read -r path; do args+=(--pnpm-list "$path"); done < <(find reports -name 'frontend-dependencies.json' -type f)
           python CrossPlatformImageFilter/product/scripts/generate_sbom.py "${args[@]}" --output SBOM.cdx.json
-          printf '{"source":"%s","python":"%s","rust":"%s","frontend":"%s","engine":"%s","desktop":"%s","supervisor":"%s","package":"%s"}\n' "$SOURCE" "$PYTHON" "$RUST" "$FRONTEND" "$ENGINE" "$DESKTOP" "$SUPERVISOR" "$PACKAGE" > job-results.json
+          printf '{"source":"%s","models":"%s","python":"%s","rust":"%s","frontend":"%s","engine":"%s","desktop":"%s","supervisor":"%s","package":"%s","native":"%s"}\n' "$SOURCE" "$MODELS" "$PYTHON" "$RUST" "$FRONTEND" "$ENGINE" "$DESKTOP" "$SUPERVISOR" "$PACKAGE" "$NATIVE" > job-results.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: commercial-desktop-reports

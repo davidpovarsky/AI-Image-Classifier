@@ -2,7 +2,12 @@
 body { margin: 0; }
 main { max-width: 900px; margin: 5rem auto; padding: 2rem; }
 .eyebrow { color: #176b63; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; }
-section { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 2rem; }
+section, .connection { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 2rem; }
+label { display: grid; gap: .4rem; font-weight: 650; }
+input, select { padding: .7rem; border: 1px solid #9fb7c3; border-radius: .5rem; font: inherit; }
+.channel { display: grid; gap: .5rem; }
 button { padding: 1rem; border-radius: .75rem; border: 1px solid #9fb7c3; background: white; text-align: start; }
 button:focus-visible { outline: 3px solid #168b7e; }
-@media (max-width: 640px) { main { margin: 1rem; padding: 1rem; } section { grid-template-columns: 1fr; } }
+button:disabled { opacity: .55; }
+pre { min-height: 8rem; overflow: auto; padding: 1rem; border-radius: .75rem; color: #e7ffff; background: #102030; }
+@media (max-width: 640px) { main { margin: 1rem; padding: 1rem; } section, .connection { grid-template-columns: 1fr; } }

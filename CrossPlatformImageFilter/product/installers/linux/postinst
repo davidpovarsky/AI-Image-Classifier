@@ -1,12 +1,17 @@
 #!/bin/sh
 set -eu
 if ! getent group local-image-filter-clients >/dev/null; then groupadd --system local-image-filter-clients; fi
-if ! getent passwd local-image-filter >/dev/null; then
-  useradd --system --gid local-image-filter-clients --home-dir /var/lib/local-ai-image-filter --shell /usr/sbin/nologin local-image-filter
+install -d -m 0700 -o root -g root /etc/local-ai-image-filter
+if [ ! -f /etc/local-ai-image-filter/secure-store.key ]; then
+  umask 077
+  head -c 32 /dev/urandom > /etc/local-ai-image-filter/secure-store.key
 fi
+chown root:root /etc/local-ai-image-filter/secure-store.key
+chmod 0600 /etc/local-ai-image-filter/secure-store.key
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
   usermod -a -G local-image-filter-clients "$SUDO_USER"
 fi
 systemctl daemon-reload
-systemctl enable --now local-ai-image-filter.service
+systemctl enable local-ai-image-filter.service
+systemctl restart local-ai-image-filter.service
 # Capture remains disabled until the administrator completes onboarding.

@@ -58,13 +58,14 @@ pub enum PolicyError {
     Time,
     #[error("policy rollback was rejected")]
     Rollback,
-    #[error("policy subject does not match this device")]
+    #[error("policy subject does not match this tenant or device")]
     Subject,
 }
 
 pub struct VerificationContext<'a> {
     pub key_id: &'a str,
     pub public_key: &'a [u8; 32],
+    pub tenant_id: Option<&'a str>,
     pub device_id: Option<&'a str>,
     pub minimum_revision: u64,
     pub now: OffsetDateTime,
@@ -85,7 +86,10 @@ pub fn verify(bytes: &[u8], context: VerificationContext<'_>) -> Result<PolicyBu
     if bundle.signature.algorithm != "Ed25519" {
         return Err(PolicyError::Signature);
     }
-    if bundle.subject.kind == "device" && Some(bundle.subject.id.as_str()) != context.device_id {
+    if (bundle.subject.kind == "tenant" && Some(bundle.subject.id.as_str()) != context.tenant_id)
+        || (bundle.subject.kind == "device"
+            && Some(bundle.subject.id.as_str()) != context.device_id)
+    {
         return Err(PolicyError::Subject);
     }
     let issued = OffsetDateTime::parse(
@@ -177,6 +181,7 @@ mod tests {
         let context = VerificationContext {
             key_id: "key",
             public_key: &[0; 32],
+            tenant_id: None,
             device_id: None,
             minimum_revision: 0,
             now: OffsetDateTime::UNIX_EPOCH,

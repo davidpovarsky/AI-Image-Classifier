@@ -5,6 +5,9 @@
   <key>BundleProgram</key><string>Contents/Library/LaunchServices/supervisor</string>
   <key>UserName</key><string>root</string>
   <key>GroupName</key><string>staff</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>LOCAL_FILTER_MACHINE_SECRET_KEY_FILE</key><string>/Library/Application Support/LocalAIImageFilter/secure-store.key</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Background</string>

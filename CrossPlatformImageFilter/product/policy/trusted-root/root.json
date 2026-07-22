@@ -1,19 +1,50 @@
 {
+  "signatures": [
+    {
+      "keyid": "development-policy-2026",
+      "sig": "8266dd02b08cc1aec5e6d4535668cf7c89984f7e0a826c3bae4ac7bca19a906c39bd575c42e7f494fa2a8b6d57f9d8156c71f70f36e7fdfd869d42d19ed6fa06"
+    }
+  ],
   "signed": {
     "_type": "root",
-    "spec_version": "1.0.31",
-    "version": 1,
-    "expires": "2030-07-21T00:00:00Z",
     "consistent_snapshot": true,
-    "keys": {},
+    "expires": "2036-07-19T02:14:39Z",
+    "keys": {
+      "development-policy-2026": {
+        "keytype": "ed25519",
+        "keyval": {
+          "public": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+        },
+        "scheme": "ed25519"
+      }
+    },
     "roles": {
-      "root": { "keyids": [], "threshold": 1 },
-      "snapshot": { "keyids": [], "threshold": 1 },
-      "targets": { "keyids": [], "threshold": 1 },
-      "timestamp": { "keyids": [], "threshold": 1 }
-    }
-  },
-  "signatures": [],
-  "releaseBlocked": true,
-  "reason": "Production TUF root keys have not been provisioned. This placeholder cannot verify metadata."
+      "root": {
+        "keyids": [
+          "development-policy-2026"
+        ],
+        "threshold": 1
+      },
+      "snapshot": {
+        "keyids": [
+          "development-policy-2026"
+        ],
+        "threshold": 1
+      },
+      "targets": {
+        "keyids": [
+          "development-policy-2026"
+        ],
+        "threshold": 1
+      },
+      "timestamp": {
+        "keyids": [
+          "development-policy-2026"
+        ],
+        "threshold": 1
+      }
+    },
+    "spec_version": "1.0.31",
+    "version": 1
+  }
 }

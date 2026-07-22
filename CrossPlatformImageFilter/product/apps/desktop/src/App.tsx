@@ -1,11 +1,14 @@
 import { type SyntheticEvent, useEffect, useState } from "react";
 import {
   activateLicense,
+  applyPolicyAssignment,
+  checkApplicationUpdate,
   authenticateAdministrator,
   createAdministratorPassword,
   exportSupportBundle,
   importOfflineLicense,
   installOrRepairCertificate,
+  installApplicationUpdate,
   protectedOperation,
   readStatus,
   refreshPolicy,
@@ -69,9 +72,9 @@ export function App() {
         {screen === "activation" && <ActivationPanel busy={busy} execute={execute} />}
         {screen === "onboarding" && <OnboardingPanel busy={busy} setBusy={setBusy} setMessage={setMessage} setStatus={setStatus} />}
         {screen === "protection" && <ProtectionPanel busy={busy} execute={execute} />}
-        {screen === "policy" && <section className="panel"><h2>{text.policy}</h2><p>{status.policyName} · revision {String(status.policyRevision)}</p><p>Company-managed. Threshold details are read-only.</p><button disabled={busy} onClick={() => { void execute(refreshPolicy); }}>{text.checkPolicy}</button></section>}
+        {screen === "policy" && <PolicyPanel status={status} busy={busy} execute={execute} checkLabel={text.checkPolicy} />}
         {screen === "diagnostics" && <DiagnosticsPanel busy={busy} setBusy={setBusy} setMessage={setMessage} />}
-        {screen === "updates" && <Panel title={text.updates} body={`Signed application updater status: ${status.lastApplicationUpdateCheck ?? "not checked"}. Policy and model updates use separate trust roots.`} />}
+        {screen === "updates" && <UpdatePanel busy={busy} setBusy={setBusy} setMessage={setMessage} />}
         {screen === "license" && <section className="panel"><h2>{text.license}</h2><p>Entitlement state: {status.licenseStatus}</p><p>Device deactivation requires administrator authorization and contacts the license provider.</p></section>}
         {screen === "administrator" && <RecoveryPanel busy={busy} setBusy={setBusy} setMessage={setMessage} setStatus={setStatus} />}
       </main>
@@ -99,6 +102,13 @@ function ProtectionPanel({ busy, execute }: { busy: boolean; execute: (action: (
   return <section className="panel"><h2>Protection controls</h2><label>Administrator password for protected actions<input type="password" autoComplete="current-password" value={password} onChange={(event) => { setPassword(event.target.value); }} /></label><div className="actions"><button disabled={busy} onClick={() => { void execute(startProtection); }}>Start / resume</button><button disabled={busy || !password} onClick={() => { void authorize("stop"); }}>Stop</button><button disabled={busy || !password} onClick={() => { void authorize("pause", 900); }}>Pause 15 minutes</button><button disabled={busy || !password} onClick={() => { void authorize("repair"); }}>Repair network</button><button disabled={busy || !password} onClick={() => { void repairCertificate(); }}>Install or repair trusted CA</button></div></section>;
 }
 
+function PolicyPanel({ status, busy, execute, checkLabel }: { status: ServiceStatus; busy: boolean; execute: (action: () => Promise<ServiceStatus>) => Promise<void>; checkLabel: string }) {
+  const [password, setPassword] = useState(""); const [assignment, setAssignment] = useState("");
+  const loadAssignment = (file: File | undefined) => { if (file) void file.text().then((text) => { const parsed = JSON.parse(text) as { signedAssignment?: unknown }; setAssignment(JSON.stringify(parsed.signedAssignment ?? parsed)); }); };
+  const apply = async () => { await execute(async () => { const authorization = await authenticateAdministrator(password, "policy"); const result = await applyPolicyAssignment(assignment, authorization); setPassword(""); setAssignment(""); return result; }); };
+  return <section className="panel"><h2>Policy</h2><p>{status.policyName} · revision {String(status.policyRevision)}</p><p>Company-managed. Threshold details are read-only.</p><div className="actions"><button disabled={busy} onClick={() => { void execute(refreshPolicy); }}>{checkLabel}</button></div><label className="file-input">Signed device assignment<input type="file" accept=".json,application/json" disabled={busy} onChange={(event) => { loadAssignment(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label><label>Administrator password<input type="password" autoComplete="current-password" value={password} onChange={(event) => { setPassword(event.target.value); }} /></label><button disabled={busy || !password || !assignment} onClick={() => { void apply(); }}>Verify assignment and refresh device policy</button></section>;
+}
+
 function RecoveryPanel({ busy, setBusy, setMessage, setStatus }: { busy: boolean; setBusy: (value: boolean) => void; setMessage: (value: string) => void; setStatus: (value: ServiceStatus) => void }) {
   const [code, setCode] = useState(""); const [token, setToken] = useState<Uint8Array>(); const [password, setPassword] = useState(""); const [newCode, setNewCode] = useState("");
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => { event.preventDefault(); setBusy(true); setMessage(""); try { const result = await resetAdministratorPassword(password, code || undefined, token); setStatus(result.status); setNewCode(result.recoveryCode); setCode(""); setToken(undefined); setPassword(""); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
@@ -112,5 +122,11 @@ function DiagnosticsPanel({ busy, setBusy, setMessage }: { busy: boolean; setBus
   return <section className="panel"><h2>Diagnostics</h2><p>Support bundles exclude images, crops, URLs, CA private keys, password hashes, license keys, and device private keys.</p><label>Administrator password<input type="password" autoComplete="current-password" value={password} onChange={(event) => { setPassword(event.target.value); }} /></label><button disabled={busy || !password} onClick={() => { void exportBundle(); }}>Export redacted support bundle</button>{bundle && <output className="bundle-result">{bundle}</output>}</section>;
 }
 
+function UpdatePanel({ busy, setBusy, setMessage }: { busy: boolean; setBusy: (value: boolean) => void; setMessage: (value: string) => void }) {
+  const [availableVersion, setAvailableVersion] = useState(""); const [notes, setNotes] = useState("");
+  const check = async () => { setBusy(true); setMessage(""); try { const update = await checkApplicationUpdate(); setAvailableVersion(update.version ?? ""); setNotes(update.available ? update.notes ?? "Signed update is available." : "This installation is current."); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
+  const install = async () => { setBusy(true); setMessage(""); try { await installApplicationUpdate(); setMessage("The signed update was verified and handed to the platform installer."); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
+  return <section className="panel"><h2>Application updates</h2><p>Application, policy, and model updates use separate channels and trust roots.</p><div className="actions"><button disabled={busy} onClick={() => { void check(); }}>Check signed application update</button><button disabled={busy || !availableVersion} onClick={() => { void install(); }}>Install version {availableVersion || "—"}</button></div>{notes && <p>{notes}</p>}</section>;
+}
+
 function StatusGrid({ status }: { status: ServiceStatus }) { const rows = [["Engine", status.engineState], ["Capture", status.captureBackend], ["Policy", `${status.policyName} r${String(status.policyRevision)}`], ["Models", status.modelStatus], ["Certificate", status.certificateStatus], ["License", status.licenseStatus]]; return <section className="cards" aria-label="Health details">{rows.map(([name, value]) => <article key={name}><p>{name}</p><strong>{value}</strong></article>)}</section>; }
-function Panel({ title, body }: { title: string; body: string }) { return <section className="panel"><h2>{title}</h2><p>{body}</p></section>; }

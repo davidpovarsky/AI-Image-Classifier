@@ -30,9 +30,16 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.ci_run_id }}
+          pattern: "*"
+          path: release-inputs
       - name: Require a signed tag and every production credential
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           MODEL_APPROVAL_JSON: ${{ secrets.MODEL_DISTRIBUTION_APPROVAL_JSON }}
           MODEL_APPROVAL_KEY_ID: ${{ secrets.MODEL_APPROVAL_KEY_ID }}
           MODEL_APPROVAL_PUBLIC_KEY: ${{ secrets.MODEL_APPROVAL_PUBLIC_KEY_BASE64 }}
@@ -44,30 +51,35 @@ jobs:
         run: |
           set -euo pipefail
           git tag -v "${{ inputs.tag }}"
+          expected_sha="$(git rev-list -n 1 '${{ inputs.tag }}')"
+          run_json="$(gh api 'repos/${{ github.repository }}/actions/runs/${{ inputs.ci_run_id }}')"
+          RUN_JSON="$run_json" EXPECTED_SHA="$expected_sha" python - <<'PY'
+          import json, os
+          run = json.loads(os.environ['RUN_JSON'])
+          assert run['name'] == 'Commercial desktop CI', run['name']
+          assert run['event'] in {'push', 'workflow_dispatch'}, run['event']
+          assert run['conclusion'] == 'success', run['conclusion']
+          assert run['head_sha'] == os.environ['EXPECTED_SHA'], (run['head_sha'], os.environ['EXPECTED_SHA'])
+          PY
           for name in MODEL_APPROVAL_JSON MODEL_APPROVAL_KEY_ID MODEL_APPROVAL_PUBLIC_KEY WINDOWS_SIGNING_CERTIFICATE MACOS_SIGNING_IDENTITY APPLE_NOTARY_KEY TAURI_SIGNING_PRIVATE_KEY PRODUCTION_TUF_ROOT; do
             test -n "${!name}" || { echo "Missing protected release secret: $name" >&2; exit 1; }
           done
           printf '%s' "$MODEL_APPROVAL_JSON" > "$RUNNER_TEMP/model-approval.json"
           printf '%s' "$PRODUCTION_TUF_ROOT" > "$RUNNER_TEMP/root.json"
           python -m pip install cryptography==48.0.1 rfc8785==0.1.4
-          test -f CrossPlatformImageFilter/models/runtime-manifest.json || { echo 'A real model runtime manifest artifact is required' >&2; exit 1; }
+          runtime_manifest=release-inputs/commercial-real-models/runtime-manifest.json
+          test -f "$runtime_manifest" || { echo 'The selected CI run did not contain the real model runtime manifest' >&2; exit 1; }
           python CrossPlatformImageFilter/product/scripts/check_model_distribution_approval.py \
             --approval "$RUNNER_TEMP/model-approval.json" \
-            --runtime-manifest CrossPlatformImageFilter/models/runtime-manifest.json \
+            --runtime-manifest "$runtime_manifest" \
             --key-id "$MODEL_APPROVAL_KEY_ID" \
             --public-key-base64 "$MODEL_APPROVAL_PUBLIC_KEY"
           python - <<'PY'
           import json, os, pathlib
           root = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'root.json').read_text())
           assert root.get('signatures'), 'Production TUF root must be signed'
-          assert not root.get('releaseBlocked', False), 'Placeholder TUF root is forbidden'
+          assert 'development-policy-2026' not in root.get('signed', {}).get('keys', {}), 'Development TUF key is forbidden'
           PY
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.ci_run_id }}
-          pattern: "*"
-          path: release-inputs
       - name: Refuse incomplete or unsigned CI inputs
         shell: bash
         run: |
@@ -79,4 +91,3 @@ jobs:
           assert all(result == 'success' for result in value.values()), value
           PY
           echo 'Credential-gated platform signing, notarization, package signing, and updater signing execute in platform release jobs once real credentials are provisioned.'
-

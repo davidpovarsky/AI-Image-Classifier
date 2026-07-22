@@ -1,9 +1,14 @@
 #![forbid(unsafe_code)]
 
+pub mod keygen_webhook;
+pub mod oidc;
+pub mod signer;
+pub mod storage;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -178,9 +183,10 @@ pub struct HttpState {
 }
 
 struct HttpStateInner {
-    challenges: Mutex<ChallengeRegistry>,
-    devices: Mutex<HashMap<Uuid, DeviceRecord>>,
-    consumed_nonces: Mutex<HashSet<String>>,
+    store: storage::Store,
+    oidc: Option<oidc::OidcVerifier>,
+    keygen_webhook: Option<keygen_webhook::KeygenWebhookVerifier>,
+    signer: Option<signer::RemoteSigner>,
     enrollment_token: String,
 }
 
@@ -191,9 +197,31 @@ impl HttpState {
         }
         Ok(Self {
             inner: Arc::new(HttpStateInner {
-                challenges: Mutex::new(ChallengeRegistry::default()),
-                devices: Mutex::new(HashMap::new()),
-                consumed_nonces: Mutex::new(HashSet::new()),
+                store: storage::Store::memory(),
+                oidc: None,
+                keygen_webhook: None,
+                signer: None,
+                enrollment_token,
+            }),
+        })
+    }
+
+    pub fn production(
+        enrollment_token: String,
+        store: storage::Store,
+        oidc: oidc::OidcVerifier,
+        keygen_webhook: keygen_webhook::KeygenWebhookVerifier,
+        signer: signer::RemoteSigner,
+    ) -> Result<Self, ControlPlaneError> {
+        if enrollment_token.len() < 32 || !matches!(&store, storage::Store::Postgres(_)) {
+            return Err(ControlPlaneError::OidcRequired);
+        }
+        Ok(Self {
+            inner: Arc::new(HttpStateInner {
+                store,
+                oidc: Some(oidc),
+                keygen_webhook: Some(keygen_webhook),
+                signer: Some(signer),
                 enrollment_token,
             }),
         })
@@ -226,7 +254,7 @@ struct RegistrationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct HealthPayload {
+pub(crate) struct HealthPayload {
     state: String,
     product_version: String,
     engine_version: String,
@@ -303,6 +331,25 @@ pub fn router(state: HttpState) -> axum::Router {
             "/v1/device/policy-acknowledgement",
             post(acknowledge_policy),
         )
+        .route("/v1/admin/device/locate", post(admin_locate_device))
+        .route(
+            "/v1/admin/device/policy-channel",
+            post(admin_policy_channel),
+        )
+        .route(
+            "/v1/admin/device/policy-refresh",
+            post(admin_policy_refresh),
+        )
+        .route(
+            "/v1/admin/device/policy-acknowledgement",
+            post(admin_policy_acknowledgement),
+        )
+        .route(
+            "/v1/admin/device/license-entitlement",
+            post(admin_license_entitlement),
+        )
+        .route("/v1/admin/device/audit-history", post(admin_audit_history))
+        .route("/v1/webhooks/keygen", post(receive_keygen_webhook))
         .layer(DefaultBodyLimit::max(MAX_DEVICE_BODY_BYTES))
         .with_state(state)
 }
@@ -314,10 +361,10 @@ async fn issue_challenge(
     let challenge = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     state
         .inner
-        .challenges
-        .lock()
-        .map_err(|_| internal())?
-        .issue(request.device_id, challenge.clone());
+        .store
+        .issue_challenge(request.device_id, challenge.clone())
+        .await
+        .map_err(|_| internal())?;
     Ok(axum::Json(ChallengeResponse {
         challenge,
         expires_in_seconds: 120,
@@ -343,10 +390,9 @@ async fn register_device(
     }
     state
         .inner
-        .challenges
-        .lock()
-        .map_err(|_| internal())?
-        .consume(request.device_id, &request.challenge)
+        .store
+        .consume_challenge(request.device_id, &request.challenge)
+        .await
         .map_err(|_| unauthorized("challengeInvalid"))?;
     let public_key: [u8; 32] = STANDARD
         .decode(request.public_key)
@@ -371,10 +417,10 @@ async fn register_device(
     };
     state
         .inner
-        .devices
-        .lock()
-        .map_err(|_| internal())?
-        .insert(device.device_id, device.clone());
+        .store
+        .upsert_device(&device)
+        .await
+        .map_err(|_| internal())?;
     Ok(axum::Json(device))
 }
 
@@ -390,7 +436,14 @@ async fn check_in(
         &request.nonce,
         &payload,
         &request.signature,
-    )?;
+    )
+    .await?;
+    state
+        .inner
+        .store
+        .record_health(request.device_id, &request.payload)
+        .await
+        .map_err(|_| internal())?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -405,13 +458,16 @@ async fn policy_metadata(
         &request.nonce,
         &serde_json::json!({"operation": "policyMetadata"}),
         &request.signature,
-    )?;
-    let devices = state.inner.devices.lock().map_err(|_| internal())?;
-    let device = devices
-        .get(&request.device_id)
-        .ok_or_else(|| unauthorized("deviceUnknown"))?;
+    )
+    .await?;
+    let device = state
+        .inner
+        .store
+        .device(request.device_id)
+        .await
+        .map_err(|_| unauthorized("deviceUnknown"))?;
     Ok(axum::Json(PolicyMetadataResponse {
-        channel: device.policy_channel.clone(),
+        channel: device.policy_channel,
         target_path: format!("policies/devices/{}/policy-bundle.json", device.device_id),
         acknowledged_revision: device.acknowledged_revision,
     }))
@@ -428,19 +484,237 @@ async fn acknowledge_policy(
         &request.nonce,
         &serde_json::json!({"revision": request.revision}),
         &request.signature,
-    )?;
-    let mut devices = state.inner.devices.lock().map_err(|_| internal())?;
-    let device = devices
-        .get_mut(&request.device_id)
-        .ok_or_else(|| unauthorized("deviceUnknown"))?;
-    if request.revision < device.acknowledged_revision {
-        return Err(bad_request("revisionRollback"));
-    }
-    device.acknowledged_revision = request.revision;
+    )
+    .await?;
+    state
+        .inner
+        .store
+        .acknowledge(request.device_id, request.revision)
+        .await
+        .map_err(|_| bad_request("revisionRollback"))?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-fn verify_device_request(
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdminDeviceRequest {
+    device_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdminPolicyChannelRequest {
+    device_id: Uuid,
+    channel: String,
+}
+
+fn admin_identity(
+    state: &HttpState,
+    headers: &axum::http::HeaderMap,
+    role: &str,
+) -> Result<oidc::AdminIdentity, ApiError> {
+    if let Some(verifier) = &state.inner.oidc {
+        return verifier
+            .verify(
+                oidc::bearer(headers).map_err(|_| unauthorized("oidcTokenInvalid"))?,
+                role,
+            )
+            .map_err(|_| unauthorized("oidcTokenInvalid"));
+    }
+    let subject = headers
+        .get("x-development-subject")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| unauthorized("developmentIdentityRequired"))?;
+    let tenant_id = headers
+        .get("x-development-tenant")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| unauthorized("developmentIdentityRequired"))?;
+    Ok(oidc::AdminIdentity {
+        subject: subject.to_owned(),
+        tenant_id,
+        roles: vec!["filter-admin".into()],
+    })
+}
+
+async fn tenant_device(
+    state: &HttpState,
+    identity: &oidc::AdminIdentity,
+    device_id: Uuid,
+) -> Result<DeviceRecord, ApiError> {
+    let device = state
+        .inner
+        .store
+        .device(device_id)
+        .await
+        .map_err(|_| unauthorized("tenantIsolation"))?;
+    if device.tenant_id != identity.tenant_id {
+        return Err(unauthorized("tenantIsolation"));
+    }
+    Ok(device)
+}
+
+async fn admin_locate_device(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminDeviceRequest>,
+) -> Result<axum::Json<DeviceRecord>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-viewer")?;
+    Ok(axum::Json(
+        tenant_device(&state, &identity, request.device_id).await?,
+    ))
+}
+
+async fn admin_policy_channel(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminPolicyChannelRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-admin")?;
+    if !matches!(request.channel.as_str(), "stable" | "beta") {
+        return Err(bad_request("policyChannelInvalid"));
+    }
+    let current_device = tenant_device(&state, &identity, request.device_id).await?;
+    let signer = state
+        .inner
+        .signer
+        .as_ref()
+        .ok_or_else(|| unavailable("policySignerCredentialRequired"))?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let signed_assignment = signer
+        .sign_assignment(signer::PolicyAssignmentClaims {
+            tenant_id: current_device.tenant_id,
+            device_id: current_device.device_id,
+            channel: request.channel.clone(),
+            target_path: format!(
+                "policies/devices/{}/policy-bundle.json",
+                current_device.device_id
+            ),
+            minimum_revision: current_device
+                .acknowledged_revision
+                .checked_add(1)
+                .ok_or_else(|| bad_request("policyRevisionExhausted"))?,
+            issued_at: now,
+            expires_at: now + 900,
+            nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        })
+        .await
+        .map_err(|_| unavailable("policySignerUnavailable"))?;
+    // Do not commit the requested channel until the external signer has returned
+    // an assignment that this service verified locally.
+    let device = state
+        .inner
+        .store
+        .set_policy_channel(
+            identity.tenant_id,
+            request.device_id,
+            &request.channel,
+            &identity.subject,
+        )
+        .await
+        .map_err(|_| bad_request("policyChannelInvalid"))?;
+    Ok(axum::Json(serde_json::json!({
+        "device": device,
+        "signedAssignment": signed_assignment,
+    })))
+}
+
+async fn admin_policy_refresh(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminDeviceRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-admin")?;
+    state
+        .inner
+        .store
+        .request_policy_refresh(identity.tenant_id, request.device_id, &identity.subject)
+        .await
+        .map_err(|_| unauthorized("tenantIsolation"))?;
+    Ok(axum::Json(serde_json::json!({"requested": true})))
+}
+
+async fn admin_policy_acknowledgement(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminDeviceRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-viewer")?;
+    let device = tenant_device(&state, &identity, request.device_id).await?;
+    Ok(axum::Json(serde_json::json!({
+        "deviceId": device.device_id,
+        "acknowledgedRevision": device.acknowledged_revision,
+        "policyChannel": device.policy_channel,
+    })))
+}
+
+async fn admin_license_entitlement(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminDeviceRequest>,
+) -> Result<axum::Json<serde_json::Value>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-viewer")?;
+    let device = tenant_device(&state, &identity, request.device_id).await?;
+    Ok(axum::Json(serde_json::json!({
+        "deviceId": device.device_id,
+        "licenseEntitlement": device.license_entitlement,
+    })))
+}
+
+async fn admin_audit_history(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<AdminDeviceRequest>,
+) -> Result<axum::Json<Vec<storage::AuditRecord>>, ApiError> {
+    let identity = admin_identity(&state, &headers, "filter-viewer")?;
+    tenant_device(&state, &identity, request.device_id).await?;
+    let records = state
+        .inner
+        .store
+        .audit_history(identity.tenant_id, request.device_id)
+        .await
+        .map_err(|_| internal())?;
+    Ok(axum::Json(records))
+}
+
+async fn receive_keygen_webhook(
+    axum::extract::State(state): axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let verifier = state
+        .inner
+        .keygen_webhook
+        .as_ref()
+        .ok_or_else(|| unavailable("keygenWebhookCredentialRequired"))?;
+    verifier
+        .verify(&headers, &body)
+        .map_err(|_| unauthorized("keygenWebhookSignatureInvalid"))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| bad_request("keygenWebhookBodyInvalid"))?;
+    let event_id = payload
+        .pointer("/data/id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| bad_request("keygenWebhookBodyInvalid"))?
+        .to_owned();
+    let event_type = payload
+        .pointer("/data/attributes/event")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| bad_request("keygenWebhookBodyInvalid"))?
+        .to_owned();
+    state
+        .inner
+        .store
+        .record_keygen_webhook(&event_id, &event_type, payload)
+        .await
+        .map_err(|_| conflict("keygenWebhookReplay"))?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn verify_device_request(
     state: &HttpState,
     device_id: Uuid,
     timestamp: i64,
@@ -455,20 +729,18 @@ fn verify_device_request(
     if nonce.len() < 32 || (timestamp - now).abs() > MAX_DEVICE_CLOCK_SKEW_SECONDS {
         return Err(unauthorized("requestExpired"));
     }
-    let replay_key = format!("{device_id}:{nonce}");
-    if !state
+    state
         .inner
-        .consumed_nonces
-        .lock()
-        .map_err(|_| internal())?
-        .insert(replay_key)
-    {
-        return Err(unauthorized("requestReplayed"));
-    }
-    let devices = state.inner.devices.lock().map_err(|_| internal())?;
-    let device = devices
-        .get(&device_id)
-        .ok_or_else(|| unauthorized("deviceUnknown"))?;
+        .store
+        .consume_nonce(device_id, nonce)
+        .await
+        .map_err(|_| unauthorized("requestReplayed"))?;
+    let device = state
+        .inner
+        .store
+        .device(device_id)
+        .await
+        .map_err(|_| unauthorized("deviceUnknown"))?;
     let public_key: [u8; 32] = device
         .public_key
         .clone()
@@ -501,6 +773,20 @@ fn unauthorized(code: &'static str) -> ApiError {
 fn bad_request(code: &'static str) -> ApiError {
     ApiError {
         status: axum::http::StatusCode::BAD_REQUEST,
+        code,
+    }
+}
+
+fn conflict(code: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::CONFLICT,
+        code,
+    }
+}
+
+fn unavailable(code: &'static str) -> ApiError {
+    ApiError {
+        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
         code,
     }
 }
@@ -644,5 +930,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn signer_failure_does_not_commit_policy_channel() {
+        let tenant_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let state = HttpState::new("e".repeat(32)).unwrap();
+        state
+            .inner
+            .store
+            .upsert_device(&DeviceRecord {
+                device_id,
+                tenant_id,
+                public_key: vec![7; 32],
+                policy_channel: "stable".into(),
+                acknowledged_revision: 4,
+                license_entitlement: "commercial".into(),
+            })
+            .await
+            .unwrap();
+        let response = router(state.clone())
+            .oneshot(
+                HttpRequest::post("/v1/admin/device/policy-channel")
+                    .header("content-type", "application/json")
+                    .header("x-development-subject", "administrator")
+                    .header("x-development-tenant", tenant_id.to_string())
+                    .body(Body::from(
+                        serde_json::json!({"deviceId": device_id, "channel": "beta"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            state
+                .inner
+                .store
+                .device(device_id)
+                .await
+                .unwrap()
+                .policy_channel,
+            "stable"
+        );
     }
 }

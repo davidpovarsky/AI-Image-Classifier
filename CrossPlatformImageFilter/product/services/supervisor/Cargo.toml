@@ -21,6 +21,7 @@ rcgen.workspace = true
 secure-storage = { path = "../../crates/secure-storage" }
 serde.workspace = true
 serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
 sha2.workspace = true
 supervisor-ipc = { path = "../../crates/supervisor-ipc" }
 time.workspace = true

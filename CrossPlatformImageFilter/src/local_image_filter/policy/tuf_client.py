@@ -21,7 +21,8 @@ from .bundle import (
 )
 
 TARGET_PATTERN = re.compile(
-    r"policies/(?:channels/(?:stable|beta)|devices/[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
+    r"policies/(?:channels/(?:stable|beta)|tenants/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|"
+    r"devices/[A-Za-z0-9][A-Za-z0-9._-]{0,127})/"
     r"policy-bundle\.json\Z"
 )
 

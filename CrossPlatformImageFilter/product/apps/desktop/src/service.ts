@@ -29,7 +29,7 @@ export interface ServiceStatus {
 }
 
 export type ProtectedOperation = "stop" | "pause" | "repair" | "uninstall" | "deactivate";
-export type AuthorizationScope = ProtectedOperation | "support";
+export type AuthorizationScope = ProtectedOperation | "support" | "policy";
 
 export interface OnboardingResult {
   status: ServiceStatus;
@@ -40,6 +40,13 @@ export interface SupportBundle {
   path: string;
   sha256: string;
   bytes: number;
+}
+
+export interface ApplicationUpdateStatus {
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+  publishedAt: string | null;
 }
 
 export async function readStatus(): Promise<ServiceStatus> {
@@ -79,6 +86,21 @@ export async function registerSupervisorService(): Promise<string> {
 
 export async function refreshPolicy(): Promise<ServiceStatus> {
   return invoke<ServiceStatus>("refresh_policy");
+}
+
+export async function applyPolicyAssignment(
+  assignment: string,
+  authorization: string,
+): Promise<ServiceStatus> {
+  return invoke<ServiceStatus>("apply_policy_assignment", { assignment, authorization });
+}
+
+export async function checkApplicationUpdate(): Promise<ApplicationUpdateStatus> {
+  return invoke<ApplicationUpdateStatus>("check_application_update");
+}
+
+export async function installApplicationUpdate(): Promise<void> {
+  await invoke("install_application_update");
 }
 
 export async function createAdministratorPassword(password: string): Promise<OnboardingResult> {

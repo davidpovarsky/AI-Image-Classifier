@@ -4,7 +4,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use interprocess::local_socket::{
     Listener, ListenerNonblockingMode, ListenerOptions, Name, Stream, prelude::*,
 };
@@ -26,7 +26,7 @@ use rcgen::{
 #[cfg(windows)]
 use secure_storage::DpapiMachineStore;
 #[cfg(unix)]
-use secure_storage::OsKeyringStore;
+use secure_storage::MachineFileStore;
 use secure_storage::{RateLimiter, SecureStore, hash_admin_password, verify_admin_password};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -93,6 +93,8 @@ struct ServiceConfiguration {
     keygen: Option<KeygenConfiguration>,
     #[serde(default)]
     recovery: Option<RecoveryConfiguration>,
+    #[serde(default)]
+    policy: Option<PolicyConfiguration>,
 }
 
 fn default_proxy_host() -> IpAddr {
@@ -140,6 +142,50 @@ struct KeygenConfiguration {
 struct RecoveryConfiguration {
     key_id: String,
     public_key_base64: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyConfiguration {
+    metadata_directory: PathBuf,
+    target_directory: PathBuf,
+    metadata_base_url: String,
+    target_base_url: String,
+    bootstrap_root: PathBuf,
+    trusted_keys: PathBuf,
+    assignment_key_id: String,
+    assignment_public_key_base64: String,
+    allowed_origins: Vec<String>,
+    targets: Vec<PolicyTargetConfiguration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyTargetConfiguration {
+    target_path: String,
+    store_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyAssignmentClaims {
+    tenant_id: String,
+    device_id: String,
+    channel: String,
+    target_path: String,
+    minimum_revision: u64,
+    issued_at: i64,
+    expires_at: i64,
+    nonce: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignedPolicyAssignment {
+    claims: PolicyAssignmentClaims,
+    key_id: String,
+    algorithm: String,
+    signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -583,11 +629,7 @@ impl Runtime {
                 self.status.state = "needsActivation".into();
                 Ok(self.status_value())
             }
-            Request::CheckPolicyUpdate => Err(error(
-                "policyClientUnavailable",
-                "no verified TUF repository is configured; the last-known-good policy remains active",
-                true,
-            )),
+            Request::CheckPolicyUpdate => self.refresh_policies(),
             Request::ResumeFiltering => {
                 self.resume_at = None;
                 self.restart_at = None;
@@ -640,11 +682,33 @@ impl Runtime {
                 self.install_or_repair_certificate()?;
                 Ok(self.status_value())
             }
-            Request::ApplyPolicyAssignment { .. } => Err(error(
-                "policyAssignmentCredentialRequired",
-                "a signed policy assignment and configured policy verification key are required",
-                false,
-            )),
+            Request::ApplyPolicyAssignment {
+                authorization,
+                assignment,
+            } => {
+                self.consume_authorization(&authorization, "policy", peer_process_id, now)?;
+                let configuration = load_service_configuration(&self.state_directory)?;
+                let policy = policy_configuration(&configuration)?;
+                let verified = verify_policy_assignment(policy, &assignment, now)?;
+                let policy_nonce = format!("policy:{}", verified.nonce);
+                if self.seen_nonces.contains(&policy_nonce) {
+                    return Err(error(
+                        "policyAssignmentReplay",
+                        "the signed policy assignment was already consumed",
+                        false,
+                    ));
+                }
+                let status = self.refresh_policies()?;
+                if self.status.policy_revision < verified.minimum_revision {
+                    return Err(error(
+                        "policyAssignmentUnfulfilled",
+                        "the signed assignment requires a policy revision that is not available",
+                        true,
+                    ));
+                }
+                self.seen_nonces.insert(policy_nonce);
+                Ok(status)
+            }
         }
     }
 
@@ -674,7 +738,8 @@ impl Runtime {
                 "proxyHost": value.proxy_host,
                 "proxyPort": value.proxy_port,
                 "keygenConfigured": value.keygen.is_some(),
-                "recoveryConfigured": value.recovery.is_some()
+                "recoveryConfigured": value.recovery.is_some(),
+                "policyConfigured": value.policy.is_some()
             })),
             "certificate": certificate.map(|value| serde_json::json!({
                 "sha256Fingerprint": value.sha256_fingerprint,
@@ -742,6 +807,35 @@ impl Runtime {
                 true,
             )
         })
+    }
+
+    fn refresh_policies(&mut self) -> Result<serde_json::Value, StructuredError> {
+        let configuration = load_service_configuration(&self.state_directory)?;
+        let policy = policy_configuration(&configuration)?;
+        let (device_id, _, _) = self.device_identity()?;
+        let mut maximum_revision = 0_u64;
+        for target in &policy.targets {
+            let minimum_revision = active_policy_revision(&target.store_directory).unwrap_or(0);
+            let report =
+                refresh_policy_target(&configuration, policy, target, &device_id, minimum_revision);
+            match report {
+                Ok(revision) => maximum_revision = maximum_revision.max(revision),
+                Err(failure) => {
+                    if verify_active_policies(&configuration, policy, &device_id).is_ok() {
+                        self.status.degraded_reason = Some(format!(
+                            "policy refresh failed; verified last-known-good policies remain active: {}",
+                            failure.message
+                        ));
+                    }
+                    return Err(failure);
+                }
+            }
+        }
+        self.status.policy_name = policy_scope_name(policy);
+        self.status.policy_revision = maximum_revision;
+        self.status.last_policy_update = Some(OffsetDateTime::now_utc().to_string());
+        self.status.degraded_reason = None;
+        Ok(self.status_value())
     }
 
     fn install_or_repair_certificate(&mut self) -> Result<(), StructuredError> {
@@ -938,7 +1032,12 @@ impl Runtime {
             ));
         }
         let configuration = load_service_configuration(&self.state_directory)?;
-        verify_engine_and_models(&configuration)?;
+        let (device_id, _, _) = self.device_identity()?;
+        let policy = policy_configuration(&configuration)?;
+        let policy_revision = verify_active_policies(&configuration, policy, &device_id)?;
+        self.status.policy_name = policy_scope_name(policy);
+        self.status.policy_revision = policy_revision;
+        verify_engine_and_models(&configuration, policy, &device_id)?;
         self.status.model_status = "verified".into();
         let certificate = load_certificate_metadata(&self.state_directory)?;
         let certificate_path = self
@@ -959,7 +1058,9 @@ impl Runtime {
             .arg("--listen-port")
             .arg(configuration.proxy_port.to_string())
             .arg("--ca-directory")
-            .arg(self.state_directory.join("ca"))
+            .arg(self.state_directory.join("ca"));
+        append_active_policy_arguments(&mut command, policy, &device_id);
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -1498,7 +1599,11 @@ fn sha256_file(path: &Path) -> Result<String, StructuredError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn verify_engine_and_models(configuration: &ServiceConfiguration) -> Result<(), StructuredError> {
+fn verify_engine_and_models(
+    configuration: &ServiceConfiguration,
+    policy: &PolicyConfiguration,
+    device_id: &str,
+) -> Result<(), StructuredError> {
     let actual_hash = sha256_file(&configuration.engine_executable)?;
     if actual_hash != configuration.engine_sha256.to_ascii_lowercase() {
         return Err(error(
@@ -1514,15 +1619,14 @@ fn verify_engine_and_models(configuration: &ServiceConfiguration) -> Result<(), 
             false,
         ));
     }
-    let report = command_output(
-        Command::new(&configuration.engine_executable).args([
-            "doctor",
-            "--config",
-            configuration.engine_config.to_string_lossy().as_ref(),
-            "--load-models",
-        ]),
-        "engine and real-model preflight",
-    )?;
+    let mut command = Command::new(&configuration.engine_executable);
+    command
+        .arg("doctor")
+        .arg("--config")
+        .arg(&configuration.engine_config)
+        .arg("--load-models");
+    append_active_policy_arguments(&mut command, policy, device_id);
+    let report = command_output(&mut command, "engine and real-model preflight")?;
     let report: serde_json::Value = serde_json::from_str(&report).map_err(|_| {
         error(
             "modelVerificationFailed",
@@ -2204,6 +2308,316 @@ fn recovery_configuration(
     Ok((configured.key_id.clone(), public_key))
 }
 
+fn policy_configuration(
+    configuration: &ServiceConfiguration,
+) -> Result<&PolicyConfiguration, StructuredError> {
+    let policy = configuration.policy.as_ref().ok_or_else(|| {
+        error(
+            "policyTrustConfigurationRequired",
+            "TUF URLs, bootstrap root, bundle verification keys, allowed origins, and targets are required in supervisor-config.json",
+            false,
+        )
+    })?;
+    let paths = [
+        &policy.metadata_directory,
+        &policy.target_directory,
+        &policy.bootstrap_root,
+        &policy.trusted_keys,
+    ];
+    if paths.iter().any(|path| !path.is_absolute())
+        || policy.assignment_key_id.is_empty()
+        || policy.assignment_key_id.len() > 128
+        || STANDARD
+            .decode(&policy.assignment_public_key_base64)
+            .ok()
+            .is_none_or(|bytes| bytes.len() != 32)
+        || policy.targets.is_empty()
+        || policy
+            .targets
+            .iter()
+            .any(|target| !target.store_directory.is_absolute())
+        || policy.allowed_origins.is_empty()
+        || !valid_policy_url(&policy.metadata_base_url, &policy.allowed_origins)
+        || !valid_policy_url(&policy.target_base_url, &policy.allowed_origins)
+    {
+        return Err(policy_configuration_error());
+    }
+    let mut previous_rank = None;
+    let mut seen = HashSet::new();
+    for target in &policy.targets {
+        let rank =
+            policy_target_rank(&target.target_path).ok_or_else(policy_configuration_error)?;
+        if previous_rank.is_some_and(|previous| rank <= previous)
+            || !seen.insert(target.target_path.clone())
+        {
+            return Err(policy_configuration_error());
+        }
+        previous_rank = Some(rank);
+    }
+    Ok(policy)
+}
+
+fn policy_configuration_error() -> StructuredError {
+    error(
+        "policyTrustConfigurationInvalid",
+        "policy configuration must use allowlisted HTTPS origins, absolute paths, and ordered unique vendor, tenant, device targets",
+        false,
+    )
+}
+
+fn valid_policy_url(url: &str, allowed_origins: &[String]) -> bool {
+    if !url.starts_with("https://") || url.contains('@') || url.contains('?') || url.contains('#') {
+        return false;
+    }
+    allowed_origins.iter().any(|origin| {
+        origin.starts_with("https://")
+            && !origin.contains('@')
+            && (url == origin || url.starts_with(&format!("{}/", origin.trim_end_matches('/'))))
+    })
+}
+
+fn policy_target_rank(path: &str) -> Option<u8> {
+    let components: Vec<&str> = path.split('/').collect();
+    if components.len() != 4
+        || components[0] != "policies"
+        || components[3] != "policy-bundle.json"
+        || components[2].is_empty()
+        || components[2].len() > 128
+        || !components[2]
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    match components[1] {
+        "channels" if matches!(components[2], "stable" | "beta") => Some(0),
+        "tenants" => Some(1),
+        "devices" => Some(2),
+        _ => None,
+    }
+}
+
+fn policy_scope_name(policy: &PolicyConfiguration) -> String {
+    policy
+        .targets
+        .iter()
+        .filter_map(|target| match policy_target_rank(&target.target_path) {
+            Some(0) => Some("vendor"),
+            Some(1) => Some("tenant"),
+            Some(2) => Some("device"),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn policy_target_identifier(policy: &PolicyConfiguration, rank: u8) -> Option<&str> {
+    policy.targets.iter().find_map(|target| {
+        (policy_target_rank(&target.target_path) == Some(rank))
+            .then(|| target.target_path.split('/').nth(2))
+            .flatten()
+    })
+}
+
+fn verify_policy_assignment(
+    policy: &PolicyConfiguration,
+    encoded: &str,
+    now: i64,
+) -> Result<PolicyAssignmentClaims, StructuredError> {
+    let assignment: SignedPolicyAssignment = serde_json::from_str(encoded).map_err(|_| {
+        error(
+            "policyAssignmentInvalid",
+            "the signed policy assignment is malformed",
+            false,
+        )
+    })?;
+    let claims = &assignment.claims;
+    let current_revision = policy
+        .targets
+        .iter()
+        .filter_map(|target| active_policy_revision(&target.store_directory))
+        .max()
+        .unwrap_or(0);
+    let expected_device_target = policy
+        .targets
+        .iter()
+        .find(|target| policy_target_rank(&target.target_path) == Some(2))
+        .map(|target| target.target_path.as_str());
+    if assignment.algorithm != "Ed25519"
+        || assignment.key_id != policy.assignment_key_id
+        || Some(claims.tenant_id.as_str()) != policy_target_identifier(policy, 1)
+        || Some(claims.device_id.as_str()) != policy_target_identifier(policy, 2)
+        || Some(claims.channel.as_str()) != policy_target_identifier(policy, 0)
+        || Some(claims.target_path.as_str()) != expected_device_target
+        || claims.minimum_revision <= current_revision
+        || claims.nonce.len() < 32
+        || claims.issued_at > now
+        || claims.expires_at < now
+        || claims.expires_at.saturating_sub(claims.issued_at) > 900
+    {
+        return Err(error(
+            "policyAssignmentInvalid",
+            "the assignment does not match this tenant, device, channel, target, revision, or validity window",
+            false,
+        ));
+    }
+    let public_key: [u8; 32] = STANDARD
+        .decode(&policy.assignment_public_key_base64)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(policy_configuration_error)?;
+    let signature = STANDARD
+        .decode(&assignment.signature)
+        .ok()
+        .and_then(|bytes| Signature::from_slice(&bytes).ok())
+        .ok_or_else(|| {
+            error(
+                "policyAssignmentInvalid",
+                "the assignment signature encoding is invalid",
+                false,
+            )
+        })?;
+    let canonical = serde_json_canonicalizer::to_vec(claims).map_err(|_| {
+        error(
+            "policyAssignmentInvalid",
+            "the assignment claims could not be canonicalized",
+            false,
+        )
+    })?;
+    VerifyingKey::from_bytes(&public_key)
+        .and_then(|key| key.verify(&canonical, &signature))
+        .map_err(|_| {
+            error(
+                "policyAssignmentInvalid",
+                "the assignment signature is invalid",
+                false,
+            )
+        })?;
+    Ok(assignment.claims)
+}
+
+fn active_policy_path(target: &PolicyTargetConfiguration) -> PathBuf {
+    target.store_directory.join("active-policy.json")
+}
+
+fn active_policy_revision(store_directory: &Path) -> Option<u64> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(store_directory.join("active-policy.json")).ok()?).ok()?;
+    value["revision"].as_u64()
+}
+
+fn append_active_policy_arguments(
+    command: &mut Command,
+    policy: &PolicyConfiguration,
+    device_id: &str,
+) {
+    for target in &policy.targets {
+        command
+            .arg("--active-policy-bundle")
+            .arg(active_policy_path(target));
+    }
+    command
+        .arg("--active-policy-trusted-keys")
+        .arg(&policy.trusted_keys);
+    if let Some(tenant_id) = policy_tenant_id(policy) {
+        command.arg("--active-policy-tenant-id").arg(tenant_id);
+    }
+    command.arg("--active-policy-device-id").arg(device_id);
+}
+
+fn policy_tenant_id(policy: &PolicyConfiguration) -> Option<&str> {
+    policy_target_identifier(policy, 1)
+}
+
+fn verify_active_policies(
+    configuration: &ServiceConfiguration,
+    policy: &PolicyConfiguration,
+    device_id: &str,
+) -> Result<u64, StructuredError> {
+    if policy
+        .targets
+        .iter()
+        .any(|target| !active_policy_path(target).is_file())
+    {
+        return Err(error(
+            "signedPolicyMissing",
+            "all configured vendor, tenant, and device signed policies must be refreshed before filtering",
+            false,
+        ));
+    }
+    let mut command = Command::new(&configuration.engine_executable);
+    command
+        .arg("print-config")
+        .arg("--config")
+        .arg(&configuration.engine_config);
+    append_active_policy_arguments(&mut command, policy, device_id);
+    command_output(&mut command, "signed policy verification")?;
+    policy
+        .targets
+        .iter()
+        .filter_map(|target| active_policy_revision(&target.store_directory))
+        .max()
+        .ok_or_else(|| {
+            error(
+                "signedPolicyInvalid",
+                "verified policy revision metadata is unavailable",
+                false,
+            )
+        })
+}
+
+fn refresh_policy_target(
+    configuration: &ServiceConfiguration,
+    policy: &PolicyConfiguration,
+    target: &PolicyTargetConfiguration,
+    device_id: &str,
+    minimum_revision: u64,
+) -> Result<u64, StructuredError> {
+    let mut command = Command::new(&configuration.engine_executable);
+    command
+        .arg("policy")
+        .arg("refresh")
+        .arg("--config")
+        .arg(&configuration.engine_config)
+        .arg("--metadata-directory")
+        .arg(&policy.metadata_directory)
+        .arg("--target-directory")
+        .arg(&policy.target_directory)
+        .arg("--metadata-base-url")
+        .arg(&policy.metadata_base_url)
+        .arg("--target-base-url")
+        .arg(&policy.target_base_url)
+        .arg("--bootstrap-root")
+        .arg(&policy.bootstrap_root)
+        .arg("--target-path")
+        .arg(&target.target_path)
+        .arg("--trusted-keys")
+        .arg(&policy.trusted_keys);
+    if let Some(tenant_id) = policy_tenant_id(policy) {
+        command.arg("--tenant-id").arg(tenant_id);
+    }
+    command
+        .arg("--device-id")
+        .arg(device_id)
+        .arg("--minimum-revision")
+        .arg(minimum_revision.to_string())
+        .arg("--policy-store")
+        .arg(&target.store_directory);
+    for origin in &policy.allowed_origins {
+        command.arg("--allowed-origin").arg(origin);
+    }
+    let output = command_output(&mut command, "TUF policy refresh")?;
+    let report: serde_json::Value =
+        serde_json::from_str(&output).map_err(|_| policy_configuration_error())?;
+    report["revision"].as_u64().ok_or_else(|| {
+        error(
+            "signedPolicyInvalid",
+            "the verified TUF policy report did not contain a revision",
+            false,
+        )
+    })
+}
+
 fn keygen_client(
     configuration: &ServiceConfiguration,
 ) -> Result<KeygenHttpClient, StructuredError> {
@@ -2222,7 +2636,23 @@ fn create_secure_store(_state_directory: &Path) -> io::Result<Box<dyn SecureStor
     }
     #[cfg(unix)]
     {
-        OsKeyringStore::new("com.localimagefilter.supervisor.v1".into())
+        let key_path = std::env::var_os("LOCAL_FILTER_MACHINE_SECRET_KEY_FILE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| io::Error::other("machine secret key path is unavailable"))?;
+        #[cfg(target_os = "macos")]
+        let store = MachineFileStore::new_or_create_key(
+            _state_directory.join("protected-secrets"),
+            &key_path,
+            "com.localimagefilter.supervisor.v1",
+        );
+        #[cfg(not(target_os = "macos"))]
+        let store = MachineFileStore::new(
+            _state_directory.join("protected-secrets"),
+            &key_path,
+            "com.localimagefilter.supervisor.v1",
+        );
+        store
             .map(|store| Box::new(store) as Box<dyn SecureStore>)
             .map_err(io::Error::other)
     }
@@ -2617,12 +3047,75 @@ fn main() -> windows_service::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer as _;
 
     #[test]
     fn password_policy_rejects_short_values() {
         assert_eq!(
             validate_password("short").unwrap_err().code,
             "passwordPolicy"
+        );
+    }
+
+    #[test]
+    fn signed_policy_assignment_is_tenant_device_and_revision_bound() {
+        let temporary = std::env::temp_dir().join(format!("assignment-test-{}", Uuid::new_v4()));
+        let tenant_id = Uuid::new_v4().to_string();
+        let device_id = Uuid::new_v4().to_string();
+        let key = SigningKey::from_bytes(&[8; 32]);
+        let policy = PolicyConfiguration {
+            metadata_directory: temporary.join("metadata"),
+            target_directory: temporary.join("targets"),
+            metadata_base_url: "https://policy.example/metadata".into(),
+            target_base_url: "https://policy.example/targets".into(),
+            bootstrap_root: temporary.join("root.json"),
+            trusted_keys: temporary.join("keys.json"),
+            assignment_key_id: "assignment-key".into(),
+            assignment_public_key_base64: STANDARD.encode(key.verifying_key().to_bytes()),
+            allowed_origins: vec!["https://policy.example".into()],
+            targets: vec![
+                PolicyTargetConfiguration {
+                    target_path: "policies/channels/stable/policy-bundle.json".into(),
+                    store_directory: temporary.join("vendor"),
+                },
+                PolicyTargetConfiguration {
+                    target_path: format!("policies/tenants/{tenant_id}/policy-bundle.json"),
+                    store_directory: temporary.join("tenant"),
+                },
+                PolicyTargetConfiguration {
+                    target_path: format!("policies/devices/{device_id}/policy-bundle.json"),
+                    store_directory: temporary.join("device"),
+                },
+            ],
+        };
+        let claims = PolicyAssignmentClaims {
+            tenant_id,
+            device_id: device_id.clone(),
+            channel: "stable".into(),
+            target_path: format!("policies/devices/{device_id}/policy-bundle.json"),
+            minimum_revision: 1,
+            issued_at: 100,
+            expires_at: 1_000,
+            nonce: "n".repeat(32),
+        };
+        let signature = STANDARD.encode(
+            key.sign(&serde_json_canonicalizer::to_vec(&claims).unwrap())
+                .to_bytes(),
+        );
+        let assignment = serde_json::json!({
+            "claims": claims,
+            "keyId": "assignment-key",
+            "algorithm": "Ed25519",
+            "signature": signature,
+        });
+        assert!(verify_policy_assignment(&policy, &assignment.to_string(), 500).is_ok());
+        let mut wrong = assignment;
+        wrong["claims"]["deviceId"] = serde_json::Value::String(Uuid::new_v4().to_string());
+        assert_eq!(
+            verify_policy_assignment(&policy, &wrong.to_string(), 500)
+                .unwrap_err()
+                .code,
+            "policyAssignmentInvalid"
         );
     }
 

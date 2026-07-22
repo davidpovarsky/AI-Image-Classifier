@@ -24,11 +24,15 @@ publish = false
 argon2 = "=0.5.3"
 axum = "=0.8.9"
 base64 = "=0.22.1"
+chacha20poly1305 = "=0.11.0"
 ctrlc = "=3.5.2"
 ed25519-dalek = "=2.2.0"
 interprocess = "=2.4.2"
+httpdate = "=1.0.3"
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 rcgen = { version = "=0.14.8", features = ["pem", "ring"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
 secrecy = "=0.10.3"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -38,6 +42,8 @@ subtle = "=2.6.1"
 thiserror = "=2.0.19"
 time = { version = "=0.3.54", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tokio-postgres = { version = "=0.7.18", features = ["with-serde_json-1", "with-uuid-1"] }
+tokio-postgres-rustls = { version = "=0.14.0", features = ["aws-lc-rs", "native-certs"] }
 tower = "=0.5.3"
 ureq = { version = "=3.3.0", features = ["json"] }
 uuid = { version = "=1.24.0", features = ["serde", "v4"] }

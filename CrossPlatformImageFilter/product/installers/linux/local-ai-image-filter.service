@@ -5,12 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=local-image-filter
+User=root
 Group=local-image-filter-clients
 RuntimeDirectory=local-ai-image-filter
 RuntimeDirectoryMode=0750
 StateDirectory=local-ai-image-filter
 StateDirectoryMode=0700
+LoadCredential=secure-store-key:/etc/local-ai-image-filter/secure-store.key
+Environment=LOCAL_FILTER_MACHINE_SECRET_KEY_FILE=%d/secure-store-key
 ExecStart=/opt/local-ai-image-filter/bin/supervisor --service
 Restart=on-failure
 RestartSec=5s
@@ -34,6 +36,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 ReadWritePaths=/var/lib/local-ai-image-filter /run/local-ai-image-filter
+ReadWritePaths=-/usr/local/share/ca-certificates -/etc/ssl/certs -/etc/pki/ca-trust
 
 [Install]
 WantedBy=multi-user.target
