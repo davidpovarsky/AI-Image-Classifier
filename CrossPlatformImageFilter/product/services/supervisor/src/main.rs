@@ -214,8 +214,15 @@ struct Runtime {
 
 impl Runtime {
     fn load(state_directory: PathBuf) -> io::Result<Self> {
-        fs::create_dir_all(&state_directory)?;
         let secure_store = create_secure_store(&state_directory)?;
+        Self::load_with_secure_store(state_directory, secure_store)
+    }
+
+    fn load_with_secure_store(
+        state_directory: PathBuf,
+        secure_store: Box<dyn SecureStore>,
+    ) -> io::Result<Self> {
+        fs::create_dir_all(&state_directory)?;
         let password_path = state_directory.join("administrator-password.phc");
         let password_hash = fs::read_to_string(password_path).ok();
         let rate_limiter = fs::read(state_directory.join("authentication-state.json"))
@@ -3049,6 +3056,26 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer as _;
 
+    struct TestSecureStore;
+
+    impl SecureStore for TestSecureStore {
+        fn put(
+            &self,
+            _name: &str,
+            _secret: &[u8],
+        ) -> Result<(), secure_storage::SecureStorageError> {
+            Ok(())
+        }
+
+        fn get(&self, _name: &str) -> Result<Option<Vec<u8>>, secure_storage::SecureStorageError> {
+            Ok(None)
+        }
+
+        fn delete(&self, _name: &str) -> Result<(), secure_storage::SecureStorageError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn password_policy_rejects_short_values() {
         assert_eq!(
@@ -3122,7 +3149,8 @@ mod tests {
     #[test]
     fn authorization_is_single_use_and_caller_bound() {
         let temporary = std::env::temp_dir().join(format!("supervisor-test-{}", Uuid::new_v4()));
-        let mut runtime = Runtime::load(temporary.clone()).unwrap();
+        let mut runtime =
+            Runtime::load_with_secure_store(temporary.clone(), Box::new(TestSecureStore)).unwrap();
         runtime.authorizations.insert(
             "token".into(),
             Authorization {
