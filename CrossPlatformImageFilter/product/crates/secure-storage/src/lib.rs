@@ -7,9 +7,11 @@ use argon2::{
 #[cfg(unix)]
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit, OsRng as AeadOsRng, Payload},
+    aead::{Aead, KeyInit, Payload},
 };
 use rand_core::OsRng;
+#[cfg(unix)]
+use rand_core::RngCore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -136,7 +138,8 @@ impl MachineFileStore {
             fs::create_dir_all(parent).map_err(|_| SecureStorageError::Backend)?;
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
                 .map_err(|_| SecureStorageError::Backend)?;
-            let key = XChaCha20Poly1305::generate_key(&mut AeadOsRng);
+            let mut key = [0_u8; 32];
+            OsRng.fill_bytes(&mut key);
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true).mode(0o600);
             match options.open(key_path) {
@@ -204,7 +207,10 @@ impl MachineFileStore {
 #[cfg(unix)]
 impl SecureStore for MachineFileStore {
     fn put(&self, name: &str, secret: &[u8]) -> Result<(), SecureStorageError> {
-        let nonce = XChaCha20Poly1305::generate_nonce(&mut AeadOsRng);
+        let mut nonce_bytes = [0_u8; 24];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce =
+            XNonce::try_from(nonce_bytes.as_slice()).map_err(|_| SecureStorageError::Backend)?;
         let encrypted = self
             .cipher
             .encrypt(
@@ -215,7 +221,7 @@ impl SecureStore for MachineFileStore {
                 },
             )
             .map_err(|_| SecureStorageError::Backend)?;
-        let mut stored = nonce.to_vec();
+        let mut stored = nonce_bytes.to_vec();
         stored.extend_from_slice(&encrypted);
         self.atomic_write(&self.path(name)?, &stored)
     }
@@ -230,9 +236,10 @@ impl SecureStore for MachineFileStore {
             return Err(SecureStorageError::Backend);
         }
         let (nonce, encrypted) = stored.split_at(24);
+        let nonce = XNonce::try_from(nonce).map_err(|_| SecureStorageError::Backend)?;
         self.cipher
             .decrypt(
-                XNonce::from_slice(nonce),
+                &nonce,
                 Payload {
                     msg: encrypted,
                     aad: &self.associated_data(name),
