@@ -396,8 +396,8 @@ jobs:
               deb="$(find native -type f -name '*.deb' -print | sed -n '1p')"
               rpm="$(find native -type f -name '*.rpm' -print | sed -n '1p')"
               test -n "$deb" -a -n "$rpm"
-              dpkg-deb --contents "$deb" | grep -q 'local-ai-image-filter.service'
-              rpm -qpl "$rpm" | grep -q 'local-ai-image-filter.service'
+              dpkg-deb --contents "$deb" | grep -F 'local-ai-image-filter.service'
+              rpm -qpl "$rpm" | grep -F 'local-ai-image-filter.service'
               test -n "$(find native -type f -name '*.AppImage' -print)"
               test -n "$(find native -type f -name '*.sig' -print)"
               signature="$(find native -type f -name '*.sig' -print | sed -n '1p')"
