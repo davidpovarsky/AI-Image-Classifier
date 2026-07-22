@@ -1376,7 +1376,7 @@ fn linux_anchor_path(fingerprint: &str) -> Result<PathBuf, StructuredError> {
 fn update_linux_ca_trust(anchor: &Path) -> Result<(), StructuredError> {
     if anchor.starts_with("/usr/local/share/ca-certificates") {
         command_output(
-            Command::new("update-ca-certificates"),
+            &mut Command::new("update-ca-certificates"),
             "Linux CA trust update",
         )?;
     } else {
@@ -2210,11 +2210,11 @@ fn keygen_client(
     KeygenHttpClient::new(keygen_configuration(configuration)?).map_err(license_provider_error)
 }
 
-fn create_secure_store(state_directory: &Path) -> io::Result<Box<dyn SecureStore>> {
+fn create_secure_store(_state_directory: &Path) -> io::Result<Box<dyn SecureStore>> {
     #[cfg(windows)]
     {
         DpapiMachineStore::new(
-            state_directory.join("protected-secrets"),
+            _state_directory.join("protected-secrets"),
             "com.localimagefilter.supervisor.v1",
         )
         .map(|store| Box::new(store) as Box<dyn SecureStore>)
