@@ -7,6 +7,48 @@ import sys
 from pathlib import Path
 
 
+def repair_linux_pillow_heif_rpaths(executable_directory: Path) -> None:
+    """Make Pillow-HEIF's vendored ELF dependency chain self-resolving.
+
+    The wheel's extension supplies the original transitive RPATH. PyInstaller
+    also emits the vendored libraries as standalone files, which linuxdeploy
+    inspects directly while building an AppImage. Give the dependency-bearing
+    libheif and libx265 libraries a local search path so that direct inspection
+    resolves their sibling libraries. Other wheel libraries, especially glibc's
+    libmvec, must remain byte-for-byte unchanged.
+    """
+    if sys.platform != "linux":
+        return
+
+    patchelf = shutil.which("patchelf")
+    if patchelf is None:
+        raise SystemExit("patchelf is required to package the Linux engine")
+
+    internal_directory = executable_directory / "_internal"
+    vendor_directory = internal_directory / "pillow_heif.libs"
+    if not vendor_directory.is_dir():
+        raise SystemExit(f"PyInstaller did not create {vendor_directory}")
+
+    vendor_libraries: list[Path] = []
+    for codec in ("libheif", "libx265"):
+        matches = sorted(path for path in vendor_directory.glob(f"{codec}*.so*") if path.is_file())
+        if not matches:
+            raise SystemExit(f"PyInstaller did not collect {codec} in {vendor_directory}")
+        vendor_libraries.extend(matches)
+
+    targets = list(vendor_libraries)
+    targets.extend(
+        duplicate
+        for library in vendor_libraries
+        if (duplicate := internal_directory / library.name).is_file()
+    )
+    for target in targets:
+        subprocess.run(
+            [patchelf, "--set-rpath", "$ORIGIN", str(target)],
+            check=True,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the self-contained onedir engine")
     parser.add_argument("--output", type=Path, default=Path("build/product-engine"))
@@ -44,6 +86,7 @@ def main() -> None:
     )
     if not executable.is_file():
         raise SystemExit(f"PyInstaller did not create {executable}")
+    repair_linux_pillow_heif_rpaths(executable.parent)
     if arguments.models is not None:
         models = arguments.models.resolve(strict=True)
         required = {

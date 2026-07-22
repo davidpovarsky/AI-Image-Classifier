@@ -256,6 +256,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: CrossPlatformImageFilter/pyproject.toml
+      - name: Install Linux engine packaging prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y patchelf
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: commercial-real-models
@@ -397,9 +401,14 @@ jobs:
               test -n "$(find native -type f -name '*.AppImage' -print)"
               test -n "$(find native -type f -name '*.sig' -print)"
               signature="$(find native -type f -name '*.sig' -print | sed -n '1p')"
+              public_key="$(find native -type f -name 'internal-updater.pub' -print | sed -n '1p')"
               test -f "${signature%.sig}"
-              minisign -Vm "${signature%.sig}" -x "$signature" \
-                -p "$(find native -type f -name 'internal-updater.pub' -print | sed -n '1p')"
+              decoded_signature="$(mktemp)"
+              decoded_public_key="$(mktemp)"
+              trap 'rm -f "$decoded_signature" "$decoded_public_key"' EXIT
+              base64 --decode "$signature" > "$decoded_signature"
+              base64 --decode "$public_key" > "$decoded_public_key"
+              minisign -Vm "${signature%.sig}" -x "$decoded_signature" -p "$decoded_public_key"
               ;;
           esac
 
