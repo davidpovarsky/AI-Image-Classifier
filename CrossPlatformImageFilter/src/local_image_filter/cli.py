@@ -135,7 +135,7 @@ def _run(args: argparse.Namespace) -> int:
         "--mode",
         mode,
     ]
-    if args.ca_directory:
+    if getattr(args, "ca_directory", None):
         ca_directory = Path(args.ca_directory).expanduser().resolve()
         if not ca_directory.is_dir():
             raise ConfigurationError(f"CA directory does not exist: {ca_directory}")

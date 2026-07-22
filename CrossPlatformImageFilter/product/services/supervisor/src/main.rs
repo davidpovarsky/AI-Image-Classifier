@@ -1498,9 +1498,7 @@ fn sha256_file(path: &Path) -> Result<String, StructuredError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn verify_engine_and_models(
-    configuration: &ServiceConfiguration,
-) -> Result<(), StructuredError> {
+fn verify_engine_and_models(configuration: &ServiceConfiguration) -> Result<(), StructuredError> {
     let actual_hash = sha256_file(&configuration.engine_executable)?;
     if actual_hash != configuration.engine_sha256.to_ascii_lowercase() {
         return Err(error(
