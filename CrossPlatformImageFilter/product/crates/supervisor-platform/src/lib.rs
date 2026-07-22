@@ -20,8 +20,6 @@ pub struct CertificateIdentity {
 
 #[derive(Debug, Error)]
 pub enum PlatformError {
-    #[error("platform operation is unsupported: {0}")]
-    Unsupported(&'static str),
     #[error("platform command failed: {0}")]
     Failed(String),
     #[error("saved proxy state is invalid")]

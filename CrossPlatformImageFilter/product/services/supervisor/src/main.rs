@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use ed25519_dalek::SigningKey;
 use interprocess::local_socket::{
     Listener, ListenerNonblockingMode, ListenerOptions, Name, Stream, prelude::*,
 };
@@ -10,11 +15,26 @@ use interprocess::{
     local_socket::GenericNamespaced,
     os::windows::{local_socket::ListenerOptionsExt, security_descriptor::SecurityDescriptor},
 };
-use secure_storage::{RateLimiter, hash_admin_password, verify_admin_password};
+use licensing::{
+    KeygenClientConfiguration, KeygenHttpClient, LicenseError, LicenseState, RecoveryReplayStore,
+    SignedRecoveryToken, VerifiedKeygenLicense, verify_keygen_machine_file,
+};
+use rand_core::{OsRng, RngCore};
+use rcgen::{
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+};
+#[cfg(windows)]
+use secure_storage::DpapiMachineStore;
+#[cfg(unix)]
+use secure_storage::OsKeyringStore;
+use secure_storage::{RateLimiter, SecureStore, hash_admin_password, verify_admin_password};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
+    fs,
+    io::{self, Read, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -27,6 +47,7 @@ use std::{
 use supervisor_ipc::{
     Envelope, Request, Response, ResponseStatus, StructuredError, read_frame, write_frame,
 };
+use time::OffsetDateTime;
 use uuid::Uuid;
 #[cfg(windows)]
 use widestring::U16CString;
@@ -37,6 +58,9 @@ const SOCKET_NAME: &str = "local-ai-image-filter.supervisor.v1";
 const UNIX_SOCKET_PATH: &str = "/var/run/local-ai-image-filter/supervisor.sock";
 const MAX_CLOCK_SKEW_SECONDS: i64 = 120;
 const AUTHORIZATION_TTL_SECONDS: i64 = 120;
+const ENGINE_HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+const ENGINE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_WATCHDOG_RESTARTS: u8 = 5;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,7 +83,63 @@ struct ServiceStatus {
 struct ServiceConfiguration {
     engine_executable: PathBuf,
     engine_config: PathBuf,
+    engine_sha256: String,
     capture_mode: String,
+    #[serde(default = "default_proxy_host")]
+    proxy_host: IpAddr,
+    #[serde(default = "default_proxy_port")]
+    proxy_port: u16,
+    #[serde(default)]
+    keygen: Option<KeygenConfiguration>,
+    #[serde(default)]
+    recovery: Option<RecoveryConfiguration>,
+}
+
+fn default_proxy_host() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+const fn default_proxy_port() -> u16 {
+    8080
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CertificateMetadata {
+    sha256_fingerprint: String,
+    trust_store: String,
+    installed_at: String,
+    installer_version: String,
+    engine_instance_id: String,
+    #[serde(default)]
+    platform_identifier: Option<String>,
+    #[serde(default)]
+    linux_anchor_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkTransaction {
+    schema_version: u32,
+    state: String,
+    proxy_address: SocketAddr,
+    snapshot: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeygenConfiguration {
+    account_id: String,
+    product_id: String,
+    account_public_key_base64: String,
+    offline_ttl_seconds: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryConfiguration {
+    key_id: String,
+    public_key_base64: String,
 }
 
 #[derive(Debug, Clone)]
@@ -78,33 +158,51 @@ struct Runtime {
     authorizations: HashMap<String, Authorization>,
     seen_nonces: HashSet<String>,
     pending_uninstall_token: Option<Authorization>,
+    secure_store: Box<dyn SecureStore>,
+    verified_license: Option<VerifiedKeygenLicense>,
+    recovery_replay: RecoveryReplayStore,
+    watchdog_failures: u8,
+    restart_at: Option<i64>,
+    resume_at: Option<i64>,
 }
 
 impl Runtime {
     fn load(state_directory: PathBuf) -> io::Result<Self> {
         fs::create_dir_all(&state_directory)?;
+        let secure_store = create_secure_store(&state_directory)?;
         let password_path = state_directory.join("administrator-password.phc");
         let password_hash = fs::read_to_string(password_path).ok();
         let rate_limiter = fs::read(state_directory.join("authentication-state.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let state = if password_hash.is_some() {
-            "stopped"
-        } else {
+        let recovery_replay = fs::read(state_directory.join("recovery-replay.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let verified_license = load_persisted_license(&state_directory, secure_store.as_ref());
+        let state = if password_hash.is_none() {
             "needsOnboarding"
+        } else if verified_license.is_none() {
+            "needsActivation"
+        } else {
+            "stopped"
         };
-        Ok(Self {
+        let license_status = verified_license
+            .as_ref()
+            .map(|license| license_state_name(license.state(OffsetDateTime::now_utc())))
+            .unwrap_or("unactivated");
+        let mut runtime = Self {
             state_directory,
             status: ServiceStatus {
                 state: state.into(),
                 engine_state: "stopped".into(),
-                capture_backend: "notConfigured".into(),
+                capture_backend: "disabled".into(),
                 policy_name: "last-known-good".into(),
                 policy_revision: 0,
                 model_status: "notVerified".into(),
                 certificate_status: "notVerified".into(),
-                license_status: "unactivated".into(),
+                license_status: license_status.into(),
                 last_policy_update: None,
                 last_application_update_check: None,
                 degraded_reason: None,
@@ -115,7 +213,23 @@ impl Runtime {
             authorizations: HashMap::new(),
             seen_nonces: HashSet::new(),
             pending_uninstall_token: None,
-        })
+            secure_store,
+            verified_license,
+            recovery_replay,
+            watchdog_failures: 0,
+            restart_at: None,
+            resume_at: None,
+        };
+        if runtime
+            .state_directory
+            .join("network-transaction.json")
+            .exists()
+            && let Err(failure) = runtime.restore_network_configuration()
+        {
+            runtime.status.state = "error".into();
+            runtime.status.degraded_reason = Some(failure.message);
+        }
+        Ok(runtime)
     }
 
     fn refresh_engine_state(&mut self) {
@@ -125,10 +239,47 @@ impl Runtime {
             .and_then(|child| child.try_wait().ok().flatten());
         if let Some(status) = exited {
             self.engine = None;
-            self.status.state = "degraded".into();
+            let network_failure = self.restore_network_configuration().err();
+            self.status.state = "recovering".into();
             self.status.engine_state = "exited".into();
             self.status.capture_backend = "disabled".into();
-            self.status.degraded_reason = Some(format!("engine exited with {status}"));
+            self.status.degraded_reason = Some(match network_failure {
+                Some(failure) => format!("engine exited with {status}; {}", failure.message),
+                None => format!("engine exited with {status}"),
+            });
+            self.restart_at = Some(now_epoch_seconds() + 1);
+        }
+    }
+
+    fn watchdog_tick(&mut self, now: i64) {
+        self.refresh_engine_state();
+        if self.resume_at.is_some_and(|deadline| deadline <= now) {
+            self.resume_at = None;
+            self.restart_at = Some(now);
+        }
+        if self.restart_at.is_none_or(|deadline| deadline > now) {
+            return;
+        }
+        self.restart_at = None;
+        match self.start_engine() {
+            Ok(_) => {
+                self.watchdog_failures = 0;
+                self.status.degraded_reason = None;
+            }
+            Err(failure) => {
+                self.watchdog_failures = self.watchdog_failures.saturating_add(1);
+                self.status.degraded_reason = Some(format!(
+                    "watchdog restart {}/{} failed: {}",
+                    self.watchdog_failures, MAX_WATCHDOG_RESTARTS, failure.message
+                ));
+                if self.watchdog_failures >= MAX_WATCHDOG_RESTARTS {
+                    self.status.state = "degraded".into();
+                } else {
+                    self.status.state = "recovering".into();
+                    let delay = 1_i64 << self.watchdog_failures.min(5);
+                    self.restart_at = Some(now + delay);
+                }
+            }
         }
     }
 
@@ -164,6 +315,18 @@ impl Runtime {
                         false,
                     )
                 })?;
+                let (recovery_code, recovery_hash) = generate_recovery_code()?;
+                atomic_write(
+                    &self.state_directory.join("recovery-code.phc"),
+                    recovery_hash.as_bytes(),
+                )
+                .map_err(|_| {
+                    error(
+                        "stateWriteFailed",
+                        "recovery-code hash could not be written",
+                        true,
+                    )
+                })?;
                 atomic_write(
                     &self.state_directory.join("administrator-password.phc"),
                     hash.as_bytes(),
@@ -177,7 +340,93 @@ impl Runtime {
                 })?;
                 self.password_hash = Some(hash);
                 self.status.state = "needsActivation".into();
-                Ok(self.status_value())
+                Ok(serde_json::json!({
+                    "status": self.status_value(),
+                    "recoveryCode": recovery_code
+                }))
+            }
+            Request::ResetAdminPassword {
+                new_password,
+                recovery_code,
+                recovery_token,
+            } => {
+                validate_password(&new_password)?;
+                if recovery_code.is_some() == recovery_token.is_some() {
+                    return Err(error(
+                        "recoveryCredentialInvalid",
+                        "provide exactly one recovery code or signed recovery token",
+                        false,
+                    ));
+                }
+                if let Some(code) = recovery_code {
+                    let recovery_hash =
+                        fs::read_to_string(self.state_directory.join("recovery-code.phc"))
+                            .map_err(|_| {
+                                error(
+                                    "recoveryCredentialInvalid",
+                                    "the one-time recovery code is unavailable",
+                                    false,
+                                )
+                            })?;
+                    if !verify_admin_password(code.into(), &recovery_hash)
+                        .map_err(|_| secure_storage_error())?
+                    {
+                        return Err(error(
+                            "recoveryCredentialInvalid",
+                            "the one-time recovery code is invalid",
+                            false,
+                        ));
+                    }
+                } else if let Some(bytes) = recovery_token {
+                    let token: SignedRecoveryToken =
+                        serde_json::from_slice(&bytes).map_err(|_| {
+                            error(
+                                "recoveryCredentialInvalid",
+                                "the signed recovery token is malformed",
+                                false,
+                            )
+                        })?;
+                    let configuration = load_service_configuration(&self.state_directory)?;
+                    let (recovery_key_id, recovery_public_key) =
+                        recovery_configuration(&configuration)?;
+                    let (device_id, _, _) = self.device_identity()?;
+                    self.recovery_replay
+                        .verify_and_consume(
+                            &token,
+                            &device_id,
+                            "password-reset",
+                            &recovery_key_id,
+                            &recovery_public_key,
+                            OffsetDateTime::now_utc(),
+                        )
+                        .map_err(license_provider_error)?;
+                    self.persist_recovery_replay()?;
+                }
+                let password_hash =
+                    hash_admin_password(new_password.into()).map_err(|_| secure_storage_error())?;
+                let (new_recovery_code, recovery_hash) = generate_recovery_code()?;
+                atomic_write(
+                    &self.state_directory.join("recovery-code.phc"),
+                    recovery_hash.as_bytes(),
+                )
+                .and_then(|()| {
+                    atomic_write(
+                        &self.state_directory.join("administrator-password.phc"),
+                        password_hash.as_bytes(),
+                    )
+                })
+                .map_err(|_| {
+                    error(
+                        "stateWriteFailed",
+                        "administrator credentials could not be rotated",
+                        true,
+                    )
+                })?;
+                self.password_hash = Some(password_hash);
+                Ok(serde_json::json!({
+                    "status": self.status_value(),
+                    "recoveryCode": new_recovery_code
+                }))
             }
             Request::VerifyAdminPassword { password, scope } => {
                 self.rate_limiter
@@ -222,15 +471,29 @@ impl Runtime {
             Request::StartFiltering => self.start_engine(),
             Request::StopFiltering { authorization } => {
                 self.consume_authorization(&authorization, "stop", peer_process_id, now)?;
+                self.resume_at = None;
+                self.restart_at = None;
                 self.stop_engine()
             }
-            Request::PauseFiltering { authorization, .. } => {
+            Request::PauseFiltering {
+                authorization,
+                seconds,
+            } => {
                 self.consume_authorization(&authorization, "pause", peer_process_id, now)?;
-                self.stop_engine()
+                if seconds == 0 || seconds > 86_400 {
+                    return Err(error(
+                        "pauseDurationInvalid",
+                        "pause duration must be between 1 second and 24 hours",
+                        false,
+                    ));
+                }
+                let status = self.stop_engine()?;
+                self.resume_at = Some(now + i64::from(seconds));
+                Ok(status)
             }
             Request::RepairNetworkConfiguration { authorization } => {
                 self.consume_authorization(&authorization, "repair", peer_process_id, now)?;
-                self.status.capture_backend = "disabled".into();
+                self.restore_network_configuration()?;
                 self.status.degraded_reason = None;
                 Ok(self.status_value())
             }
@@ -265,6 +528,8 @@ impl Runtime {
             }
             Request::PrepareUninstall { authorization } => {
                 self.consume_authorization(&authorization, "uninstall-finalize", 0, now)?;
+                self.restore_network_configuration()?;
+                self.remove_product_certificate()?;
                 self.pending_uninstall_token = None;
                 fs::remove_file(self.state_directory.join("uninstall-authorization.token"))
                     .or_else(|error| {
@@ -287,6 +552,33 @@ impl Runtime {
             }
             Request::DeactivateDevice { authorization } => {
                 self.consume_authorization(&authorization, "deactivate", peer_process_id, now)?;
+                let current = self
+                    .verified_license
+                    .as_ref()
+                    .ok_or_else(|| error("notActivated", "this device is not activated", false))?;
+                let license_key = self
+                    .secure_store
+                    .get("license-key")
+                    .map_err(|_| secure_storage_error())?
+                    .ok_or_else(|| {
+                        error(
+                            "onlineDeactivationUnavailable",
+                            "an imported offline license has no online deactivation credential",
+                            false,
+                        )
+                    })?;
+                let license_key =
+                    String::from_utf8(license_key).map_err(|_| secure_storage_error())?;
+                let configuration = load_service_configuration(&self.state_directory)?;
+                let client = keygen_client(&configuration)?;
+                client
+                    .deactivate(&license_key, &current.machine_id)
+                    .map_err(license_provider_error)?;
+                self.secure_store
+                    .delete("license-key")
+                    .and_then(|()| self.secure_store.delete("license-file"))
+                    .map_err(|_| secure_storage_error())?;
+                self.verified_license = None;
                 self.status.license_status = "unactivated".into();
                 self.status.state = "needsActivation".into();
                 Ok(self.status_value())
@@ -296,17 +588,122 @@ impl Runtime {
                 "no verified TUF repository is configured; the last-known-good policy remains active",
                 true,
             )),
-            Request::ResumeFiltering => self.start_engine(),
-            Request::ActivateLicense { .. }
-            | Request::ImportOfflineLicense { .. }
-            | Request::ApplyPolicyAssignment { .. }
-            | Request::ExportSupportBundle { .. }
-            | Request::InstallOrRepairCertificate { .. } => Err(error(
-                "operationNotConfigured",
-                "this production operation requires installer-provisioned credentials and configuration",
+            Request::ResumeFiltering => {
+                self.resume_at = None;
+                self.restart_at = None;
+                self.start_engine()
+            }
+            Request::ActivateLicense { license_key } => {
+                let configuration = load_service_configuration(&self.state_directory)?;
+                let client = keygen_client(&configuration)?;
+                let (fingerprint, _, public_key) = self.device_identity()?;
+                let verified = client
+                    .activate(
+                        &license_key,
+                        &fingerprint,
+                        &public_key,
+                        OffsetDateTime::now_utc(),
+                    )
+                    .map_err(license_provider_error)?;
+                self.secure_store
+                    .put("license-key", license_key.as_bytes())
+                    .and_then(|()| self.secure_store.put("license-file", &verified.certificate))
+                    .map_err(|_| secure_storage_error())?;
+                self.apply_verified_license(verified);
+                Ok(self.status_value())
+            }
+            Request::ImportOfflineLicense { license } => {
+                let configuration = load_service_configuration(&self.state_directory)?;
+                let keygen = keygen_configuration(&configuration)?;
+                let (fingerprint, public_key_base64, _) = self.device_identity()?;
+                let verified = verify_keygen_machine_file(
+                    &license,
+                    &fingerprint,
+                    &public_key_base64,
+                    &keygen.product_id,
+                    &keygen.account_public_key,
+                    OffsetDateTime::now_utc(),
+                )
+                .map_err(license_provider_error)?;
+                self.secure_store
+                    .put("license-file", &verified.certificate)
+                    .map_err(|_| secure_storage_error())?;
+                self.apply_verified_license(verified);
+                Ok(self.status_value())
+            }
+            Request::ExportSupportBundle { authorization } => {
+                self.consume_authorization(&authorization, "support", peer_process_id, now)?;
+                self.export_support_bundle()
+            }
+            Request::InstallOrRepairCertificate { authorization } => {
+                self.consume_authorization(&authorization, "repair", peer_process_id, now)?;
+                self.install_or_repair_certificate()?;
+                Ok(self.status_value())
+            }
+            Request::ApplyPolicyAssignment { .. } => Err(error(
+                "policyAssignmentCredentialRequired",
+                "a signed policy assignment and configured policy verification key are required",
                 false,
             )),
         }
+    }
+
+    fn export_support_bundle(&mut self) -> Result<serde_json::Value, StructuredError> {
+        let support_directory = self.state_directory.join("support");
+        fs::create_dir_all(&support_directory).map_err(|_| {
+            error(
+                "supportBundleWriteFailed",
+                "the protected support directory could not be created",
+                true,
+            )
+        })?;
+        let created_at = OffsetDateTime::now_utc();
+        let file_name = format!("support-{}.json", created_at.unix_timestamp());
+        let path = support_directory.join(file_name);
+        let configuration = load_service_configuration(&self.state_directory).ok();
+        let certificate = load_certificate_metadata(&self.state_directory).ok();
+        let payload = serde_json::json!({
+            "schemaVersion": 1,
+            "createdAt": created_at,
+            "productVersion": env!("CARGO_PKG_VERSION"),
+            "platform": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH,
+            "status": self.status,
+            "configuration": configuration.map(|value| serde_json::json!({
+                "captureMode": value.capture_mode,
+                "proxyHost": value.proxy_host,
+                "proxyPort": value.proxy_port,
+                "keygenConfigured": value.keygen.is_some(),
+                "recoveryConfigured": value.recovery.is_some()
+            })),
+            "certificate": certificate.map(|value| serde_json::json!({
+                "sha256Fingerprint": value.sha256_fingerprint,
+                "trustStore": value.trust_store,
+                "installedAt": value.installed_at,
+                "installerVersion": value.installer_version,
+                "engineInstanceId": value.engine_instance_id
+            }))
+        });
+        let bytes = serde_json::to_vec_pretty(&payload).map_err(|_| {
+            error(
+                "supportBundleWriteFailed",
+                "support diagnostics could not be serialized",
+                false,
+            )
+        })?;
+        atomic_write(&path, &bytes).map_err(|_| {
+            error(
+                "supportBundleWriteFailed",
+                "support diagnostics could not be written",
+                true,
+            )
+        })?;
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        Ok(serde_json::json!({
+            "path": path,
+            "sha256": sha256,
+            "bytes": bytes.len()
+        }))
     }
 
     fn persist_rate_limiter(&self) -> Result<(), StructuredError> {
@@ -328,6 +725,161 @@ impl Runtime {
                 true,
             )
         })
+    }
+
+    fn persist_recovery_replay(&self) -> Result<(), StructuredError> {
+        let bytes = serde_json::to_vec(&self.recovery_replay).map_err(|_| {
+            error(
+                "stateWriteFailed",
+                "recovery replay state could not be serialized",
+                false,
+            )
+        })?;
+        atomic_write(&self.state_directory.join("recovery-replay.json"), &bytes).map_err(|_| {
+            error(
+                "stateWriteFailed",
+                "recovery replay state could not be persisted",
+                true,
+            )
+        })
+    }
+
+    fn install_or_repair_certificate(&mut self) -> Result<(), StructuredError> {
+        let mut metadata = ensure_ca_material(&self.state_directory)?;
+        let certificate_path = self
+            .state_directory
+            .join("ca")
+            .join("mitmproxy-ca-cert.cer");
+        let platform = install_platform_certificate(&certificate_path, &metadata)?;
+        metadata.platform_identifier = platform.platform_identifier;
+        metadata.linux_anchor_path = platform.linux_anchor_path;
+        persist_certificate_metadata(&self.state_directory, &metadata)?;
+        verify_platform_certificate(&certificate_path, &metadata)?;
+        self.status.certificate_status = "trusted".into();
+        Ok(())
+    }
+
+    fn remove_product_certificate(&mut self) -> Result<(), StructuredError> {
+        let metadata = match load_certificate_metadata(&self.state_directory) {
+            Ok(value) => value,
+            Err(error) if error.code == "certificateMetadataMissing" => {
+                self.status.certificate_status = "notInstalled".into();
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let certificate_path = self
+            .state_directory
+            .join("ca")
+            .join("mitmproxy-ca-cert.cer");
+        verify_certificate_file(&certificate_path, &metadata.sha256_fingerprint)?;
+        remove_platform_certificate(&certificate_path, &metadata)?;
+        let ca_directory = self.state_directory.join("ca");
+        for name in [
+            "mitmproxy-ca.pem",
+            "mitmproxy-ca-cert.pem",
+            "mitmproxy-ca-cert.cer",
+            "certificate-metadata.json",
+        ] {
+            remove_file_if_present(&ca_directory.join(name)).map_err(|_| {
+                error(
+                    "certificateRemovalFailed",
+                    "product CA material could not be removed",
+                    true,
+                )
+            })?;
+        }
+        self.status.certificate_status = "notInstalled".into();
+        Ok(())
+    }
+
+    fn restore_network_configuration(&mut self) -> Result<(), StructuredError> {
+        let transaction = self.state_directory.join("network-transaction.json");
+        if !transaction.exists() {
+            self.status.capture_backend = "disabled".into();
+            return Ok(());
+        }
+        let bytes = fs::read(&transaction).map_err(|_| network_recovery_error())?;
+        let saved: NetworkTransaction =
+            serde_json::from_slice(&bytes).map_err(|_| network_recovery_error())?;
+        if saved.schema_version != 1 {
+            return Err(network_recovery_error());
+        }
+        restore_platform_proxy(&saved.snapshot)?;
+        verify_platform_proxy_restored(&saved.snapshot)?;
+        remove_file_if_present(&transaction).map_err(|_| network_recovery_error())?;
+        self.status.capture_backend = "disabled".into();
+        Ok(())
+    }
+
+    fn enable_network_capture(
+        &mut self,
+        configuration: &ServiceConfiguration,
+    ) -> Result<(), StructuredError> {
+        if configuration.capture_mode == "local" {
+            self.status.capture_backend = "mitmLocalCapture".into();
+            return Ok(());
+        }
+        let transaction_path = self.state_directory.join("network-transaction.json");
+        if transaction_path.exists() {
+            self.restore_network_configuration()?;
+        }
+        let proxy_address = SocketAddr::new(configuration.proxy_host, configuration.proxy_port);
+        let snapshot = snapshot_platform_proxy()?;
+        let mut transaction = NetworkTransaction {
+            schema_version: 1,
+            state: "prepared".into(),
+            proxy_address,
+            snapshot,
+        };
+        persist_network_transaction(&transaction_path, &transaction)?;
+        if let Err(failure) = enable_platform_proxy(proxy_address) {
+            let _ = restore_platform_proxy(&transaction.snapshot);
+            let _ = verify_platform_proxy_restored(&transaction.snapshot);
+            let _ = remove_file_if_present(&transaction_path);
+            return Err(failure);
+        }
+        transaction.state = "enabled".into();
+        persist_network_transaction(&transaction_path, &transaction)?;
+        self.status.capture_backend = "regularSystemProxy".into();
+        Ok(())
+    }
+
+    fn device_identity(&self) -> Result<(String, String, [u8; 32]), StructuredError> {
+        let private_key = match self
+            .secure_store
+            .get("device-private-key")
+            .map_err(|_| secure_storage_error())?
+        {
+            Some(bytes) => bytes.try_into().map_err(|_| secure_storage_error())?,
+            None => {
+                let bytes = SigningKey::generate(&mut OsRng).to_bytes();
+                self.secure_store
+                    .put("device-private-key", &bytes)
+                    .map_err(|_| secure_storage_error())?;
+                bytes
+            }
+        };
+        let signing_key = SigningKey::from_bytes(&private_key);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let public_key_base64 = STANDARD.encode(public_key);
+        let machine_identifier = stable_machine_identifier(self.secure_store.as_ref())?;
+        let mut digest = Sha256::new();
+        digest.update(b"com.localimagefilter.device.v1\0");
+        digest.update(machine_identifier.as_bytes());
+        let fingerprint = format!("{:x}", digest.finalize());
+        Ok((fingerprint, public_key_base64, public_key))
+    }
+
+    fn apply_verified_license(&mut self, verified: VerifiedKeygenLicense) {
+        self.status.license_status =
+            license_state_name(verified.state(OffsetDateTime::now_utc())).into();
+        self.status.state = if self.password_hash.is_some() {
+            "stopped".into()
+        } else {
+            "needsOnboarding".into()
+        };
+        self.verified_license = Some(verified);
     }
 
     fn consume_authorization(
@@ -369,14 +921,32 @@ impl Runtime {
                 false,
             ));
         }
-        if self.status.license_status == "unactivated" {
+        let license_state = self
+            .verified_license
+            .as_ref()
+            .map(|license| license.state(OffsetDateTime::now_utc()))
+            .unwrap_or(LicenseState::Unactivated);
+        self.status.license_status = license_state_name(license_state).into();
+        if !matches!(
+            license_state,
+            LicenseState::ActiveOnline | LicenseState::ActiveOffline | LicenseState::Grace
+        ) {
             return Err(error(
                 "notActivated",
-                "a verified license is required before filtering",
+                "an active, cryptographically verified license is required before filtering",
                 false,
             ));
         }
         let configuration = load_service_configuration(&self.state_directory)?;
+        verify_engine_and_models(&configuration)?;
+        self.status.model_status = "verified".into();
+        let certificate = load_certificate_metadata(&self.state_directory)?;
+        let certificate_path = self
+            .state_directory
+            .join("ca")
+            .join("mitmproxy-ca-cert.cer");
+        verify_platform_certificate(&certificate_path, &certificate)?;
+        self.status.certificate_status = "trusted".into();
         let mut command = Command::new(&configuration.engine_executable);
         command
             .arg("run")
@@ -384,6 +954,12 @@ impl Runtime {
             .arg(&configuration.engine_config)
             .arg("--mode")
             .arg(&configuration.capture_mode)
+            .arg("--listen-host")
+            .arg(configuration.proxy_host.to_string())
+            .arg("--listen-port")
+            .arg(configuration.proxy_port.to_string())
+            .arg("--ca-directory")
+            .arg(self.state_directory.join("ca"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -394,52 +970,1110 @@ impl Runtime {
                 true,
             )
         })?;
-        thread::sleep(Duration::from_millis(750));
-        if child
-            .try_wait()
-            .map_err(|_| {
-                error(
-                    "engineHealthFailed",
-                    "engine process health could not be read",
-                    true,
-                )
-            })?
-            .is_some()
-        {
-            return Err(error(
-                "engineHealthFailed",
-                "engine exited during startup",
-                true,
-            ));
+        wait_for_engine_health(
+            &mut child,
+            SocketAddr::new(configuration.proxy_host, configuration.proxy_port),
+        )?;
+        if let Err(failure) = self.enable_network_capture(&configuration) {
+            let _ = graceful_stop(&mut child);
+            return Err(failure);
         }
         self.engine = Some(child);
         self.status.state = "running".into();
         self.status.engine_state = "running".into();
-        self.status.capture_backend = configuration.capture_mode;
         self.status.degraded_reason = None;
+        self.watchdog_failures = 0;
         Ok(self.status_value())
     }
 
     fn stop_engine(&mut self) -> Result<serde_json::Value, StructuredError> {
         // Capture is declared disabled before process termination so a regular-proxy
         // backend can restore its exact snapshot before this point.
-        self.status.capture_backend = "disabled".into();
+        self.restore_network_configuration()?;
         if let Some(mut child) = self.engine.take() {
-            child
-                .kill()
-                .and_then(|()| child.wait().map(|_| ()))
-                .map_err(|_| {
-                    error(
-                        "engineStopFailed",
-                        "engine process could not be stopped",
-                        true,
-                    )
-                })?;
+            graceful_stop(&mut child)?;
         }
         self.status.state = "stopped".into();
         self.status.engine_state = "stopped".into();
         Ok(self.status_value())
     }
+}
+
+#[derive(Debug)]
+struct PlatformCertificateInstallation {
+    platform_identifier: Option<String>,
+    linux_anchor_path: Option<PathBuf>,
+}
+
+fn ensure_ca_material(state_directory: &Path) -> Result<CertificateMetadata, StructuredError> {
+    let ca_directory = state_directory.join("ca");
+    fs::create_dir_all(&ca_directory).map_err(|_| certificate_generation_error())?;
+    let certificate_der_path = ca_directory.join("mitmproxy-ca-cert.cer");
+    if let Ok(metadata) = load_certificate_metadata(state_directory) {
+        verify_certificate_file(&certificate_der_path, &metadata.sha256_fingerprint)?;
+        return Ok(metadata);
+    }
+
+    let key = KeyPair::generate().map_err(|_| certificate_generation_error())?;
+    let mut params = CertificateParams::default();
+    params.not_before = OffsetDateTime::now_utc() - time::Duration::days(1);
+    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(3650);
+    let mut distinguished_name = DistinguishedName::new();
+    distinguished_name.push(DnType::OrganizationName, "Local AI Image Filter");
+    distinguished_name.push(DnType::CommonName, "Local AI Image Filter Installation CA");
+    params.distinguished_name = distinguished_name;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let certificate = params
+        .self_signed(&key)
+        .map_err(|_| certificate_generation_error())?;
+    let certificate_der = certificate.der().as_ref();
+    let certificate_pem = certificate.pem();
+    let private_key_pem = key.serialize_pem();
+    let combined_pem = format!("{private_key_pem}{certificate_pem}");
+    atomic_write(
+        &ca_directory.join("mitmproxy-ca.pem"),
+        combined_pem.as_bytes(),
+    )
+    .and_then(|()| {
+        atomic_write(
+            &ca_directory.join("mitmproxy-ca-cert.pem"),
+            certificate_pem.as_bytes(),
+        )
+    })
+    .and_then(|()| atomic_write(&certificate_der_path, certificate_der))
+    .map_err(|_| certificate_generation_error())?;
+    set_private_file_permissions(&ca_directory.join("mitmproxy-ca.pem"))?;
+
+    let instance_path = state_directory.join("engine-instance-id");
+    let engine_instance_id = fs::read_to_string(&instance_path).unwrap_or_else(|_| {
+        let value = Uuid::new_v4().to_string();
+        let _ = atomic_write(&instance_path, value.as_bytes());
+        value
+    });
+    let metadata = CertificateMetadata {
+        sha256_fingerprint: format!("{:x}", Sha256::digest(certificate_der)),
+        trust_store: platform_trust_store().into(),
+        installed_at: OffsetDateTime::now_utc().to_string(),
+        installer_version: env!("CARGO_PKG_VERSION").into(),
+        engine_instance_id: engine_instance_id.trim().into(),
+        platform_identifier: None,
+        linux_anchor_path: None,
+    };
+    persist_certificate_metadata(state_directory, &metadata)?;
+    Ok(metadata)
+}
+
+fn certificate_generation_error() -> StructuredError {
+    error(
+        "certificateGenerationFailed",
+        "the unique installation CA could not be generated or persisted",
+        true,
+    )
+}
+
+fn persist_certificate_metadata(
+    state_directory: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    let bytes = serde_json::to_vec_pretty(metadata).map_err(|_| certificate_generation_error())?;
+    atomic_write(
+        &state_directory.join("ca").join("certificate-metadata.json"),
+        &bytes,
+    )
+    .map_err(|_| certificate_generation_error())
+}
+
+fn load_certificate_metadata(
+    state_directory: &Path,
+) -> Result<CertificateMetadata, StructuredError> {
+    let bytes =
+        fs::read(state_directory.join("ca").join("certificate-metadata.json")).map_err(|_| {
+            error(
+                "certificateMetadataMissing",
+                "the product CA has not been generated and approved",
+                false,
+            )
+        })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        error(
+            "certificateMetadataInvalid",
+            "the product CA metadata is invalid",
+            false,
+        )
+    })
+}
+
+fn verify_certificate_file(path: &Path, expected_sha256: &str) -> Result<(), StructuredError> {
+    let certificate = fs::read(path).map_err(|_| {
+        error(
+            "certificateFileMissing",
+            "the product CA certificate file is unavailable",
+            false,
+        )
+    })?;
+    let actual = format!("{:x}", Sha256::digest(certificate));
+    if actual != expected_sha256 {
+        return Err(error(
+            "certificateFingerprintMismatch",
+            "the product CA certificate does not match the recorded fingerprint",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), StructuredError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|_| certificate_generation_error())
+}
+
+#[cfg(windows)]
+fn set_private_file_permissions(_path: &Path) -> Result<(), StructuredError> {
+    // The installer gives only SYSTEM and Administrators access to ProgramData's
+    // product directory. DPAPI remains in use for license and device secrets.
+    Ok(())
+}
+
+#[cfg(windows)]
+fn platform_trust_store() -> &'static str {
+    "Windows LocalMachine Root"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_trust_store() -> &'static str {
+    "macOS System.keychain"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_trust_store() -> &'static str {
+    "Linux system CA trust"
+}
+
+fn command_output(command: &mut Command, operation: &str) -> Result<String, StructuredError> {
+    let output = command.output().map_err(|_| {
+        error(
+            "platformCommandFailed",
+            &format!("{operation} could not be started"),
+            true,
+        )
+    })?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        return Err(error(
+            "platformCommandFailed",
+            &format!("{operation} failed: {}", message.trim()),
+            true,
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        error(
+            "platformCommandFailed",
+            &format!("{operation} returned invalid text"),
+            false,
+        )
+    })
+}
+
+#[cfg(windows)]
+fn powershell_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+#[cfg(windows)]
+fn install_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<PlatformCertificateInstallation, StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $c=Import-Certificate -FilePath '{}' -CertStoreLocation 'Cert:\\LocalMachine\\Root'; $c.Thumbprint",
+        powershell_literal(certificate_path)
+    );
+    let thumbprint = command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]),
+        "Windows CA installation",
+    )?
+    .trim()
+    .to_ascii_uppercase();
+    if thumbprint.len() != 40 || !thumbprint.bytes().all(|value| value.is_ascii_hexdigit()) {
+        return Err(error(
+            "certificateInstallationFailed",
+            "Windows returned an invalid installed certificate thumbprint",
+            false,
+        ));
+    }
+    Ok(PlatformCertificateInstallation {
+        platform_identifier: Some(thumbprint),
+        linux_anchor_path: None,
+    })
+}
+
+#[cfg(windows)]
+fn verify_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    let thumbprint = metadata.platform_identifier.as_deref().ok_or_else(|| {
+        error(
+            "certificateTrustMissing",
+            "the Windows certificate thumbprint was not recorded",
+            false,
+        )
+    })?;
+    let script = format!(
+        "$c=Get-Item 'Cert:\\LocalMachine\\Root\\{thumbprint}' -ErrorAction Stop; $s=[Security.Cryptography.SHA256]::Create(); (($s.ComputeHash($c.RawData)|ForEach-Object {{$_.ToString('x2')}})-join '')"
+    );
+    let fingerprint = command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]),
+        "Windows CA trust verification",
+    )?;
+    if fingerprint.trim() != metadata.sha256_fingerprint {
+        return Err(error(
+            "certificateFingerprintMismatch",
+            "the trusted Windows certificate does not match this installation",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_platform_certificate(certificate_path, metadata)?;
+    let thumbprint = metadata.platform_identifier.as_deref().ok_or_else(|| {
+        error(
+            "certificateTrustMissing",
+            "the Windows certificate thumbprint was not recorded",
+            false,
+        )
+    })?;
+    let script = format!("Remove-Item 'Cert:\\LocalMachine\\Root\\{thumbprint}' -ErrorAction Stop");
+    command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]),
+        "Windows CA removal",
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<PlatformCertificateInstallation, StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    command_output(
+        Command::new("/usr/bin/security").args([
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+            certificate_path.to_string_lossy().as_ref(),
+        ]),
+        "macOS CA installation",
+    )?;
+    Ok(PlatformCertificateInstallation {
+        platform_identifier: Some(metadata.sha256_fingerprint.to_ascii_uppercase()),
+        linux_anchor_path: None,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    let output = command_output(
+        Command::new("/usr/bin/security").args([
+            "find-certificate",
+            "-a",
+            "-Z",
+            "/Library/Keychains/System.keychain",
+        ]),
+        "macOS CA trust verification",
+    )?;
+    if !output
+        .to_ascii_lowercase()
+        .contains(&metadata.sha256_fingerprint)
+    {
+        return Err(error(
+            "certificateTrustMissing",
+            "the exact product CA is not trusted by the macOS system keychain",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn remove_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_platform_certificate(certificate_path, metadata)?;
+    command_output(
+        Command::new("/usr/bin/security").args([
+            "delete-certificate",
+            "-Z",
+            &metadata.sha256_fingerprint.to_ascii_uppercase(),
+            "/Library/Keychains/System.keychain",
+        ]),
+        "macOS CA removal",
+    )?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_anchor_path(fingerprint: &str) -> Result<PathBuf, StructuredError> {
+    let name = format!("local-ai-image-filter-{}.crt", &fingerprint[..16]);
+    for root in [
+        Path::new("/usr/local/share/ca-certificates"),
+        Path::new("/etc/pki/ca-trust/source/anchors"),
+    ] {
+        if root.is_dir() {
+            return Ok(root.join(&name));
+        }
+    }
+    Err(error(
+        "certificateTrustStoreUnavailable",
+        "neither update-ca-certificates nor update-ca-trust has a system anchor directory",
+        false,
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn update_linux_ca_trust(anchor: &Path) -> Result<(), StructuredError> {
+    if anchor.starts_with("/usr/local/share/ca-certificates") {
+        command_output(
+            Command::new("update-ca-certificates"),
+            "Linux CA trust update",
+        )?;
+    } else {
+        command_output(
+            Command::new("update-ca-trust").arg("extract"),
+            "Linux CA trust update",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn install_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<PlatformCertificateInstallation, StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    let anchor = linux_anchor_path(&metadata.sha256_fingerprint)?;
+    fs::copy(certificate_path, &anchor).map_err(|_| {
+        error(
+            "certificateInstallationFailed",
+            "the Linux system CA anchor could not be written",
+            true,
+        )
+    })?;
+    update_linux_ca_trust(&anchor)?;
+    Ok(PlatformCertificateInstallation {
+        platform_identifier: Some(metadata.sha256_fingerprint.clone()),
+        linux_anchor_path: Some(anchor),
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn verify_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_certificate_file(certificate_path, &metadata.sha256_fingerprint)?;
+    let anchor = metadata.linux_anchor_path.as_deref().ok_or_else(|| {
+        error(
+            "certificateTrustMissing",
+            "the Linux CA anchor was not recorded",
+            false,
+        )
+    })?;
+    verify_certificate_file(anchor, &metadata.sha256_fingerprint)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn remove_platform_certificate(
+    certificate_path: &Path,
+    metadata: &CertificateMetadata,
+) -> Result<(), StructuredError> {
+    verify_platform_certificate(certificate_path, metadata)?;
+    let anchor = metadata.linux_anchor_path.as_deref().ok_or_else(|| {
+        error(
+            "certificateTrustMissing",
+            "the Linux CA anchor was not recorded",
+            false,
+        )
+    })?;
+    remove_file_if_present(anchor).map_err(|_| {
+        error(
+            "certificateRemovalFailed",
+            "the exact Linux CA anchor could not be removed",
+            true,
+        )
+    })?;
+    update_linux_ca_trust(anchor)
+}
+
+fn remove_file_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn persist_network_transaction(
+    path: &Path,
+    transaction: &NetworkTransaction,
+) -> Result<(), StructuredError> {
+    let bytes = serde_json::to_vec_pretty(transaction).map_err(|_| network_recovery_error())?;
+    atomic_write(path, &bytes).map_err(|_| network_recovery_error())
+}
+
+fn network_recovery_error() -> StructuredError {
+    error(
+        "networkRecoveryFailed",
+        "the exact original proxy configuration could not be restored and verified",
+        true,
+    )
+}
+
+fn sha256_file(path: &Path) -> Result<String, StructuredError> {
+    let mut file = fs::File::open(path).map_err(|_| {
+        error(
+            "engineVerificationFailed",
+            "the configured engine executable is unavailable",
+            false,
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let length = file.read(&mut buffer).map_err(|_| {
+            error(
+                "engineVerificationFailed",
+                "the engine executable could not be hashed",
+                true,
+            )
+        })?;
+        if length == 0 {
+            break;
+        }
+        digest.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn verify_engine_and_models(
+    configuration: &ServiceConfiguration,
+) -> Result<(), StructuredError> {
+    let actual_hash = sha256_file(&configuration.engine_executable)?;
+    if actual_hash != configuration.engine_sha256.to_ascii_lowercase() {
+        return Err(error(
+            "engineVerificationFailed",
+            "the engine executable does not match the installer-recorded SHA-256",
+            false,
+        ));
+    }
+    if !configuration.engine_config.is_file() {
+        return Err(error(
+            "engineConfigurationMissing",
+            "the engine configuration file is unavailable",
+            false,
+        ));
+    }
+    let report = command_output(
+        Command::new(&configuration.engine_executable).args([
+            "doctor",
+            "--config",
+            configuration.engine_config.to_string_lossy().as_ref(),
+            "--load-models",
+        ]),
+        "engine and real-model preflight",
+    )?;
+    let report: serde_json::Value = serde_json::from_str(&report).map_err(|_| {
+        error(
+            "modelVerificationFailed",
+            "the engine preflight returned an invalid report",
+            false,
+        )
+    })?;
+    if report["modelLoad"]["success"] != true
+        || report["models"].as_object().is_none_or(|models| {
+            models.len() < 6 || models.values().any(|value| value["exists"] != true)
+        })
+    {
+        return Err(error(
+            "modelVerificationFailed",
+            "real model hashes, artifacts, or ONNX sessions failed verification",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_proxy_snapshot_script() -> &'static str {
+    r#"$ErrorActionPreference='Stop'
+$rows=@()
+Get-ChildItem 'Registry::HKEY_USERS' | Where-Object {$_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$'} | ForEach-Object {
+  $sid=$_.PSChildName
+  $path="Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+  $exists=Test-Path $path
+  $key=if($exists){Get-Item $path}else{$null}
+  $row=[ordered]@{sid=$sid;keyExists=$exists}
+  foreach($name in @('ProxyEnable','ProxyServer','ProxyOverride','AutoConfigURL')) {
+    $present=$null -ne $key -and $key.GetValueNames() -contains $name
+    $value=if($present){$key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}else{$null}
+    $row[$name]=[ordered]@{present=$present;value=$value}
+  }
+  $rows += [pscustomobject]$row
+}
+[ordered]@{kind='windows';users=@($rows)} | ConvertTo-Json -Compress -Depth 6"#
+}
+
+#[cfg(windows)]
+fn snapshot_platform_proxy() -> Result<serde_json::Value, StructuredError> {
+    let output = command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            windows_proxy_snapshot_script(),
+        ]),
+        "Windows proxy snapshot",
+    )?;
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&output).map_err(|_| network_recovery_error())?;
+    if snapshot["users"].as_array().is_none_or(Vec::is_empty) {
+        return Err(error(
+            "proxyTargetUnavailable",
+            "no interactive Windows user registry hive is loaded",
+            true,
+        ));
+    }
+    Ok(snapshot)
+}
+
+#[cfg(windows)]
+fn enable_platform_proxy(address: SocketAddr) -> Result<(), StructuredError> {
+    if !address.ip().is_loopback() {
+        return Err(network_recovery_error());
+    }
+    let script = r#"$ErrorActionPreference='Stop'
+Get-ChildItem 'Registry::HKEY_USERS' | Where-Object {$_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$'} | ForEach-Object {
+  $path="Registry::HKEY_USERS\$($_.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+  New-Item $path -Force | Out-Null
+  New-ItemProperty $path -Name ProxyServer -PropertyType String -Value '__PROXY__' -Force | Out-Null
+  New-ItemProperty $path -Name ProxyEnable -PropertyType DWord -Value 1 -Force | Out-Null
+}"#
+        .replace("__PROXY__", &address.to_string());
+    command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]),
+        "Windows proxy enable",
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restore_platform_proxy(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if snapshot["kind"] != "windows" {
+        return Err(network_recovery_error());
+    }
+    let encoded =
+        STANDARD.encode(serde_json::to_vec(snapshot).map_err(|_| network_recovery_error())?);
+    let script = r#"$ErrorActionPreference='Stop'
+$json=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__SNAPSHOT__')) | ConvertFrom-Json
+foreach($u in $json.users) {
+  $path="Registry::HKEY_USERS\$($u.sid)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+  if(-not $u.keyExists) { if(Test-Path $path){Remove-Item $path -Recurse -Force}; continue }
+  New-Item $path -Force | Out-Null
+  foreach($name in @('ProxyEnable','ProxyServer','ProxyOverride','AutoConfigURL')) {
+    $saved=$u.$name
+    if($saved.present) {
+      $type=if($name -eq 'ProxyEnable'){'DWord'}else{'String'}
+      New-ItemProperty $path -Name $name -PropertyType $type -Value $saved.value -Force | Out-Null
+    } else { Remove-ItemProperty $path -Name $name -ErrorAction SilentlyContinue }
+  }
+}"#
+        .replace("__SNAPSHOT__", &encoded);
+    command_output(
+        Command::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]),
+        "Windows proxy restoration",
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_platform_proxy_restored(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if &snapshot_platform_proxy()? == snapshot {
+        Ok(())
+    } else {
+        Err(network_recovery_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_proxy_state(service: &str, secure: bool) -> Result<serde_json::Value, StructuredError> {
+    let option = if secure {
+        "-getsecurewebproxy"
+    } else {
+        "-getwebproxy"
+    };
+    let output = command_output(
+        Command::new("/usr/sbin/networksetup").args([option, service]),
+        "macOS proxy snapshot",
+    )?;
+    let mut enabled = false;
+    let mut server = String::new();
+    let mut port = 0_u16;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("Enabled: ") {
+            enabled = value == "Yes";
+        } else if let Some(value) = line.strip_prefix("Server: ") {
+            server = value.into();
+        } else if let Some(value) = line.strip_prefix("Port: ") {
+            port = value.parse().unwrap_or(0);
+        }
+    }
+    Ok(serde_json::json!({"enabled": enabled, "server": server, "port": port}))
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_platform_proxy() -> Result<serde_json::Value, StructuredError> {
+    let services = command_output(
+        Command::new("/usr/sbin/networksetup").arg("-listallnetworkservices"),
+        "macOS network service discovery",
+    )?;
+    let mut rows = Vec::new();
+    for line in services.lines().skip(1) {
+        let service = line.trim_start_matches('*').trim();
+        if service.is_empty() {
+            continue;
+        }
+        let bypass_output = command_output(
+            Command::new("/usr/sbin/networksetup").args(["-getproxybypassdomains", service]),
+            "macOS proxy bypass snapshot",
+        )?;
+        let bypass: Vec<&str> = if bypass_output.starts_with("There aren't any") {
+            Vec::new()
+        } else {
+            bypass_output
+                .lines()
+                .filter(|value| !value.is_empty())
+                .collect()
+        };
+        rows.push(serde_json::json!({
+            "service": service,
+            "web": mac_proxy_state(service, false)?,
+            "secureWeb": mac_proxy_state(service, true)?,
+            "bypass": bypass
+        }));
+    }
+    if rows.is_empty() {
+        return Err(error(
+            "proxyTargetUnavailable",
+            "macOS has no configurable network service",
+            true,
+        ));
+    }
+    Ok(serde_json::json!({"kind": "macos", "services": rows}))
+}
+
+#[cfg(target_os = "macos")]
+fn enable_platform_proxy(address: SocketAddr) -> Result<(), StructuredError> {
+    let snapshot = snapshot_platform_proxy()?;
+    let host = address.ip().to_string();
+    let port = address.port().to_string();
+    for row in snapshot["services"]
+        .as_array()
+        .ok_or_else(network_recovery_error)?
+    {
+        let service = row["service"].as_str().ok_or_else(network_recovery_error)?;
+        for option in ["-setwebproxy", "-setsecurewebproxy"] {
+            command_output(
+                Command::new("/usr/sbin/networksetup").args([option, service, &host, &port]),
+                "macOS proxy enable",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn restore_platform_proxy(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if snapshot["kind"] != "macos" {
+        return Err(network_recovery_error());
+    }
+    for row in snapshot["services"]
+        .as_array()
+        .ok_or_else(network_recovery_error)?
+    {
+        let service = row["service"].as_str().ok_or_else(network_recovery_error)?;
+        for (name, state_option, value_option) in [
+            ("web", "-setwebproxystate", "-setwebproxy"),
+            ("secureWeb", "-setsecurewebproxystate", "-setsecurewebproxy"),
+        ] {
+            let saved = &row[name];
+            let server = saved["server"].as_str().unwrap_or("");
+            let port = saved["port"].as_u64().unwrap_or(0).to_string();
+            if !server.is_empty() && port != "0" {
+                command_output(
+                    Command::new("/usr/sbin/networksetup").args([
+                        value_option,
+                        service,
+                        server,
+                        &port,
+                    ]),
+                    "macOS proxy restoration",
+                )?;
+            }
+            let state = if saved["enabled"].as_bool().unwrap_or(false) {
+                "on"
+            } else {
+                "off"
+            };
+            command_output(
+                Command::new("/usr/sbin/networksetup").args([state_option, service, state]),
+                "macOS proxy restoration",
+            )?;
+        }
+        let bypass = row["bypass"]
+            .as_array()
+            .ok_or_else(network_recovery_error)?;
+        let mut command = Command::new("/usr/sbin/networksetup");
+        command.args(["-setproxybypassdomains", service]);
+        if bypass.is_empty() {
+            command.arg("Empty");
+        } else {
+            for value in bypass {
+                command.arg(value.as_str().ok_or_else(network_recovery_error)?);
+            }
+        }
+        command_output(&mut command, "macOS proxy bypass restoration")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_platform_proxy_restored(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if &snapshot_platform_proxy()? == snapshot {
+        Ok(())
+    } else {
+        Err(network_recovery_error())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_proxy_users() -> Result<Vec<(String, String, String)>, StructuredError> {
+    let mut users = Vec::new();
+    let entries = fs::read_dir("/run/user").map_err(|_| {
+        error(
+            "proxyTargetUnavailable",
+            "Linux has no active graphical user runtime directory",
+            true,
+        )
+    })?;
+    for entry in entries.flatten() {
+        let uid = entry.file_name().to_string_lossy().into_owned();
+        if uid == "0"
+            || !uid.bytes().all(|value| value.is_ascii_digit())
+            || !entry.path().join("bus").exists()
+        {
+            continue;
+        }
+        let user = command_output(
+            Command::new("id").args(["-nu", &uid]),
+            "Linux graphical user discovery",
+        )?
+        .trim()
+        .to_owned();
+        if !user.is_empty()
+            && user
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
+        {
+            users.push((user, uid.clone(), format!("unix:path=/run/user/{uid}/bus")));
+        }
+    }
+    if users.is_empty() {
+        return Err(error(
+            "proxyTargetUnavailable",
+            "Linux regular proxy mode requires an active GNOME session; local capture remains available",
+            true,
+        ));
+    }
+    Ok(users)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_gsettings(
+    user: &(String, String, String),
+    arguments: &[&str],
+) -> Result<String, StructuredError> {
+    let runtime = format!("XDG_RUNTIME_DIR=/run/user/{}", user.1);
+    let bus = format!("DBUS_SESSION_BUS_ADDRESS={}", user.2);
+    let mut command = Command::new("runuser");
+    command.args(["-u", &user.0, "--", "env", &runtime, &bus, "gsettings"]);
+    command.args(arguments);
+    command_output(&mut command, "GNOME proxy operation")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_proxy_keys() -> [(&'static str, &'static str); 7] {
+    [
+        ("org.gnome.system.proxy", "mode"),
+        ("org.gnome.system.proxy", "use-same-proxy"),
+        ("org.gnome.system.proxy", "ignore-hosts"),
+        ("org.gnome.system.proxy.http", "host"),
+        ("org.gnome.system.proxy.http", "port"),
+        ("org.gnome.system.proxy.https", "host"),
+        ("org.gnome.system.proxy.https", "port"),
+    ]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn snapshot_platform_proxy() -> Result<serde_json::Value, StructuredError> {
+    let mut rows = Vec::new();
+    for user in linux_proxy_users()? {
+        let mut values = serde_json::Map::new();
+        for (schema, key) in linux_proxy_keys() {
+            values.insert(
+                format!("{schema}|{key}"),
+                serde_json::Value::String(
+                    linux_gsettings(&user, &["get", schema, key])?.trim().into(),
+                ),
+            );
+        }
+        rows.push(
+            serde_json::json!({"user": user.0, "uid": user.1, "bus": user.2, "values": values}),
+        );
+    }
+    Ok(serde_json::json!({"kind": "linuxGnome", "users": rows}))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_user_from_row(
+    row: &serde_json::Value,
+) -> Result<(String, String, String), StructuredError> {
+    Ok((
+        row["user"]
+            .as_str()
+            .ok_or_else(network_recovery_error)?
+            .into(),
+        row["uid"]
+            .as_str()
+            .ok_or_else(network_recovery_error)?
+            .into(),
+        row["bus"]
+            .as_str()
+            .ok_or_else(network_recovery_error)?
+            .into(),
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn enable_platform_proxy(address: SocketAddr) -> Result<(), StructuredError> {
+    for user in linux_proxy_users()? {
+        let host = format!("'{}'", address.ip());
+        let port = address.port().to_string();
+        for (schema, key, value) in [
+            ("org.gnome.system.proxy.http", "host", host.clone()),
+            ("org.gnome.system.proxy.http", "port", port.clone()),
+            ("org.gnome.system.proxy.https", "host", host.clone()),
+            ("org.gnome.system.proxy.https", "port", port.clone()),
+            ("org.gnome.system.proxy", "use-same-proxy", "true".into()),
+            ("org.gnome.system.proxy", "mode", "'manual'".into()),
+        ] {
+            linux_gsettings(&user, &["set", schema, key, &value])?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn restore_platform_proxy(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if snapshot["kind"] != "linuxGnome" {
+        return Err(network_recovery_error());
+    }
+    for row in snapshot["users"]
+        .as_array()
+        .ok_or_else(network_recovery_error)?
+    {
+        let user = linux_user_from_row(row)?;
+        for (compound, value) in row["values"]
+            .as_object()
+            .ok_or_else(network_recovery_error)?
+        {
+            let (schema, key) = compound
+                .split_once('|')
+                .ok_or_else(network_recovery_error)?;
+            linux_gsettings(
+                &user,
+                &[
+                    "set",
+                    schema,
+                    key,
+                    value.as_str().ok_or_else(network_recovery_error)?,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn verify_platform_proxy_restored(snapshot: &serde_json::Value) -> Result<(), StructuredError> {
+    if &snapshot_platform_proxy()? == snapshot {
+        Ok(())
+    } else {
+        Err(network_recovery_error())
+    }
+}
+
+fn wait_for_engine_health(child: &mut Child, address: SocketAddr) -> Result<(), StructuredError> {
+    let deadline = std::time::Instant::now() + ENGINE_HEALTH_TIMEOUT;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| engine_health_error())?
+            .is_some()
+        {
+            return Err(engine_health_error());
+        }
+        if probe_http_proxy(address).is_ok() && probe_https_proxy(address).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(engine_health_error());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn probe_http_proxy(address: SocketAddr) -> io::Result<()> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(
+        b"GET http://local-filter.invalid/.well-known/local-image-filter/health HTTP/1.1\r\nHost: local-filter.invalid\r\nConnection: close\r\n\r\n",
+    )?;
+    let mut response = [0_u8; 256];
+    let length = stream.read(&mut response)?;
+    let response = std::str::from_utf8(&response[..length]).map_err(io::Error::other)?;
+    if response.starts_with("HTTP/1.1 204") || response.starts_with("HTTP/1.0 204") {
+        Ok(())
+    } else {
+        Err(io::Error::other("proxy health endpoint did not return 204"))
+    }
+}
+
+fn probe_https_proxy(address: SocketAddr) -> Result<(), StructuredError> {
+    let proxy = format!("http://{address}");
+    command_output(
+        Command::new(if cfg!(windows) { "curl.exe" } else { "curl" }).args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "5",
+            "--proxy",
+            &proxy,
+            "https://local-filter.invalid/.well-known/local-image-filter/health",
+        ]),
+        "controlled HTTPS proxy health check",
+    )?;
+    Ok(())
+}
+
+fn engine_health_error() -> StructuredError {
+    error(
+        "engineHealthFailed",
+        "the engine did not pass controlled HTTP and HTTPS health checks",
+        true,
+    )
+}
+
+fn graceful_stop(child: &mut Child) -> Result<(), StructuredError> {
+    #[cfg(windows)]
+    let _ = Command::new("taskkill.exe")
+        .args(["/PID", &child.id().to_string(), "/T"])
+        .output();
+    #[cfg(unix)]
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", &child.id().to_string()])
+        .output();
+
+    let deadline = std::time::Instant::now() + ENGINE_STOP_TIMEOUT;
+    loop {
+        if child.try_wait().map_err(|_| engine_stop_error())?.is_some() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return child
+                .kill()
+                .and_then(|()| child.wait().map(|_| ()))
+                .map_err(|_| engine_stop_error());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn engine_stop_error() -> StructuredError {
+    error(
+        "engineStopFailed",
+        "the engine process could not be stopped after the bounded shutdown timeout",
+        true,
+    )
 }
 
 fn validate_password(password: &str) -> Result<(), StructuredError> {
@@ -454,35 +2088,274 @@ fn validate_password(password: &str) -> Result<(), StructuredError> {
     }
 }
 
+fn generate_recovery_code() -> Result<(String, String), StructuredError> {
+    let mut entropy = [0_u8; 24];
+    OsRng.fill_bytes(&mut entropy);
+    let encoded = URL_SAFE_NO_PAD.encode(entropy);
+    let recovery_code = encoded
+        .as_bytes()
+        .chunks(8)
+        .map(|chunk| std::str::from_utf8(chunk).expect("base64url is valid UTF-8"))
+        .collect::<Vec<_>>()
+        .join("-");
+    let hash = hash_admin_password(recovery_code.clone().into()).map_err(|_| {
+        error(
+            "passwordHashFailed",
+            "the recovery code could not be hashed",
+            false,
+        )
+    })?;
+    Ok((recovery_code, hash))
+}
+
 fn load_service_configuration(
     state_directory: &Path,
 ) -> Result<ServiceConfiguration, StructuredError> {
     let path = state_directory.join("supervisor-config.json");
     let bytes = fs::read(path).map_err(|_| {
         error(
-            "serviceNotConfigured",
+            "serviceConfigurationMissing",
             "supervisor configuration is unavailable",
             false,
         )
     })?;
     let configuration: ServiceConfiguration = serde_json::from_slice(&bytes).map_err(|_| {
         error(
-            "serviceNotConfigured",
+            "serviceConfigurationInvalid",
             "supervisor configuration is invalid",
             false,
         )
     })?;
     if !configuration.engine_executable.is_absolute()
         || !configuration.engine_config.is_absolute()
+        || configuration.engine_sha256.len() != 64
+        || !configuration
+            .engine_sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
         || !matches!(configuration.capture_mode.as_str(), "regular" | "local")
+        || !configuration.proxy_host.is_loopback()
+        || configuration.proxy_port == 0
     {
         return Err(error(
-            "serviceNotConfigured",
-            "supervisor paths or capture mode are invalid",
+            "serviceConfigurationInvalid",
+            "supervisor paths, engine SHA-256, capture mode, or loopback proxy endpoint are invalid",
             false,
         ));
     }
     Ok(configuration)
+}
+
+fn keygen_configuration(
+    configuration: &ServiceConfiguration,
+) -> Result<KeygenClientConfiguration, StructuredError> {
+    let configured = configuration.keygen.as_ref().ok_or_else(|| {
+        error(
+            "licenseProviderCredentialRequired",
+            "Keygen accountId, productId, accountPublicKeyBase64, and offlineTtlSeconds are required in supervisor-config.json",
+            false,
+        )
+    })?;
+    let public_key = STANDARD
+        .decode(&configured.account_public_key_base64)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            error(
+                "licenseProviderConfigurationInvalid",
+                "Keygen accountPublicKeyBase64 must decode to exactly 32 bytes",
+                false,
+            )
+        })?;
+    Ok(KeygenClientConfiguration {
+        account_id: configured.account_id.clone(),
+        product_id: configured.product_id.clone(),
+        account_public_key: public_key,
+        offline_ttl_seconds: configured.offline_ttl_seconds,
+    })
+}
+
+fn recovery_configuration(
+    configuration: &ServiceConfiguration,
+) -> Result<(String, [u8; 32]), StructuredError> {
+    let configured = configuration.recovery.as_ref().ok_or_else(|| {
+        error(
+            "recoverySigningCredentialRequired",
+            "recovery keyId and publicKeyBase64 are required in supervisor-config.json",
+            false,
+        )
+    })?;
+    let public_key = STANDARD
+        .decode(&configured.public_key_base64)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            error(
+                "recoverySigningConfigurationInvalid",
+                "recovery publicKeyBase64 must decode to exactly 32 bytes",
+                false,
+            )
+        })?;
+    if configured.key_id.is_empty() || configured.key_id.len() > 128 {
+        return Err(error(
+            "recoverySigningConfigurationInvalid",
+            "recovery keyId is invalid",
+            false,
+        ));
+    }
+    Ok((configured.key_id.clone(), public_key))
+}
+
+fn keygen_client(
+    configuration: &ServiceConfiguration,
+) -> Result<KeygenHttpClient, StructuredError> {
+    KeygenHttpClient::new(keygen_configuration(configuration)?).map_err(license_provider_error)
+}
+
+fn create_secure_store(state_directory: &Path) -> io::Result<Box<dyn SecureStore>> {
+    #[cfg(windows)]
+    {
+        DpapiMachineStore::new(
+            state_directory.join("protected-secrets"),
+            "com.localimagefilter.supervisor.v1",
+        )
+        .map(|store| Box::new(store) as Box<dyn SecureStore>)
+        .map_err(io::Error::other)
+    }
+    #[cfg(unix)]
+    {
+        OsKeyringStore::new("com.localimagefilter.supervisor.v1".into())
+            .map(|store| Box::new(store) as Box<dyn SecureStore>)
+            .map_err(io::Error::other)
+    }
+}
+
+fn stable_machine_identifier(secure_store: &dyn SecureStore) -> Result<String, StructuredError> {
+    #[cfg(windows)]
+    let native = Command::new("reg.exe")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Cryptography",
+            "/v",
+            "MachineGuid",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| output.split_whitespace().last().map(str::to_owned));
+    #[cfg(target_os = "macos")]
+    let native = Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| {
+            output.lines().find_map(|line| {
+                line.split_once("IOPlatformUUID")
+                    .and_then(|(_, value)| value.split('"').nth(1))
+                    .map(str::to_owned)
+            })
+        });
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let native = ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .into_iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .map(|value| value.trim().to_owned());
+
+    if let Some(identifier) = native.filter(|value| !value.is_empty() && value.len() <= 256) {
+        return Ok(identifier);
+    }
+    if let Some(bytes) = secure_store
+        .get("installation-identifier")
+        .map_err(|_| secure_storage_error())?
+    {
+        return String::from_utf8(bytes).map_err(|_| secure_storage_error());
+    }
+    let identifier = Uuid::new_v4().to_string();
+    secure_store
+        .put("installation-identifier", identifier.as_bytes())
+        .map_err(|_| secure_storage_error())?;
+    Ok(identifier)
+}
+
+fn load_persisted_license(
+    state_directory: &Path,
+    secure_store: &dyn SecureStore,
+) -> Option<VerifiedKeygenLicense> {
+    let configuration = load_service_configuration(state_directory).ok()?;
+    let keygen = keygen_configuration(&configuration).ok()?;
+    let certificate = secure_store.get("license-file").ok()??;
+    let private_key: [u8; 32] = secure_store
+        .get("device-private-key")
+        .ok()??
+        .try_into()
+        .ok()?;
+    let public_key = SigningKey::from_bytes(&private_key)
+        .verifying_key()
+        .to_bytes();
+    let public_key_base64 = STANDARD.encode(public_key);
+    let machine_identifier = stable_machine_identifier(secure_store).ok()?;
+    let mut digest = Sha256::new();
+    digest.update(b"com.localimagefilter.device.v1\0");
+    digest.update(machine_identifier.as_bytes());
+    let fingerprint = format!("{:x}", digest.finalize());
+    verify_keygen_machine_file(
+        &certificate,
+        &fingerprint,
+        &public_key_base64,
+        &keygen.product_id,
+        &keygen.account_public_key,
+        OffsetDateTime::now_utc(),
+    )
+    .ok()
+}
+
+fn license_state_name(state: LicenseState) -> &'static str {
+    match state {
+        LicenseState::Unactivated => "unactivated",
+        LicenseState::ActiveOnline => "activeOnline",
+        LicenseState::ActiveOffline => "activeOffline",
+        LicenseState::Grace => "grace",
+        LicenseState::Expired => "expired",
+        LicenseState::Suspended => "suspended",
+        LicenseState::Revoked => "revoked",
+        LicenseState::ValidationError => "validationError",
+    }
+}
+
+fn license_provider_error(value: LicenseError) -> StructuredError {
+    match value {
+        LicenseError::ActivationLimit => error(
+            "activationLimitReached",
+            "the Keygen machine activation limit was reached",
+            false,
+        ),
+        LicenseError::Transport => error(
+            "licenseProviderUnavailable",
+            "Keygen could not be reached over its pinned HTTPS endpoint",
+            true,
+        ),
+        LicenseError::Device => error(
+            "licenseDeviceMismatch",
+            "the signed machine license belongs to a different device",
+            false,
+        ),
+        _ => error(
+            "licenseVerificationFailed",
+            "the license could not be cryptographically verified",
+            false,
+        ),
+    }
+}
+
+fn secure_storage_error() -> StructuredError {
+    error(
+        "secureStorageFailed",
+        "the operating-system protected secret store failed",
+        true,
+    )
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -655,6 +2528,9 @@ fn run_server(shutdown: Arc<AtomicBool>) -> io::Result<()> {
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if let Ok(mut runtime) = runtime.lock() {
+                    runtime.watchdog_tick(now_epoch_seconds());
+                }
                 thread::sleep(Duration::from_millis(50));
             }
             Err(error) => return Err(error),
@@ -791,8 +2667,39 @@ mod tests {
         .unwrap();
         assert_eq!(
             load_service_configuration(&temporary).unwrap_err().code,
-            "serviceNotConfigured"
+            "serviceConfigurationInvalid"
         );
         fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn generated_ca_is_unique_and_fingerprint_bound() {
+        let first = std::env::temp_dir().join(format!("supervisor-ca-test-{}", Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("supervisor-ca-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let first_metadata = ensure_ca_material(&first).unwrap();
+        let second_metadata = ensure_ca_material(&second).unwrap();
+        assert_ne!(
+            first_metadata.sha256_fingerprint,
+            second_metadata.sha256_fingerprint
+        );
+        assert!(
+            verify_certificate_file(
+                &first.join("ca").join("mitmproxy-ca-cert.cer"),
+                &first_metadata.sha256_fingerprint
+            )
+            .is_ok()
+        );
+        let combined = fs::read_to_string(first.join("ca").join("mitmproxy-ca.pem")).unwrap();
+        assert!(combined.contains("BEGIN PRIVATE KEY"));
+        assert!(combined.contains("BEGIN CERTIFICATE"));
+        assert!(
+            !serde_json::to_string(&first_metadata)
+                .unwrap()
+                .contains("PRIVATE KEY")
+        );
+        fs::remove_dir_all(first).unwrap();
+        fs::remove_dir_all(second).unwrap();
     }
 }

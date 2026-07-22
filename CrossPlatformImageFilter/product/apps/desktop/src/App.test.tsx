@@ -9,6 +9,10 @@ vi.mock("./service", () => ({
     lastPolicyUpdate: null, lastApplicationUpdateCheck: null, degradedReason: null,
   })),
   startProtection: vi.fn(), protectedOperation: vi.fn(), refreshPolicy: vi.fn(),
+  authenticateAdministrator: vi.fn(), createAdministratorPassword: vi.fn(),
+  importOfflineLicense: vi.fn(), activateLicense: vi.fn(), registerSupervisorService: vi.fn(),
+  resetAdministratorPassword: vi.fn(), installOrRepairCertificate: vi.fn(),
+  exportSupportBundle: vi.fn(),
 }));
 
 describe("desktop UI", () => {
@@ -34,5 +38,14 @@ describe("desktop UI", () => {
     expect(policy).toHaveFocus();
     fireEvent.click(policy);
     expect(policy).toHaveAttribute("aria-current", "page");
+  });
+
+  it("renders real activation and onboarding forms", () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Activation" }));
+    expect(screen.getByLabelText("License key")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("Signed offline machine license")).toHaveAttribute("type", "file");
+    fireEvent.click(screen.getByRole("button", { name: "Onboarding" }));
+    expect(screen.getByLabelText("Administrator password")).toHaveAttribute("autocomplete", "new-password");
   });
 });

@@ -31,10 +31,25 @@ pub struct ServiceStatus {
     degraded_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingResult {
+    status: ServiceStatus,
+    recovery_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundle {
+    path: String,
+    sha256: String,
+    bytes: usize,
+}
+
 impl ServiceStatus {
     fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            state: "serviceUnavailable".into(),
+            state: "supervisorUnreachable".into(),
             engine_state: "unknown".into(),
             capture_backend: "unknown".into(),
             policy_name: "unknown".into(),
@@ -111,17 +126,67 @@ fn refresh_policy() -> Result<ServiceStatus, String> {
 }
 
 #[tauri::command]
+fn create_administrator_password(password: String) -> Result<OnboardingResult, String> {
+    if password.len() < 12 || password.len() > 4096 {
+        return Err("administrator password must contain between 12 and 4096 characters".into());
+    }
+    send_request(Request::SetAdminPassword { password })
+}
+
+#[tauri::command]
+fn reset_administrator_password(
+    new_password: String,
+    recovery_code: Option<String>,
+    recovery_token: Option<Vec<u8>>,
+) -> Result<OnboardingResult, String> {
+    if new_password.len() < 12 || new_password.len() > 4096 {
+        return Err("administrator password must contain between 12 and 4096 characters".into());
+    }
+    send_request(Request::ResetAdminPassword {
+        new_password,
+        recovery_code,
+        recovery_token,
+    })
+}
+
+#[tauri::command]
+fn activate_license(license_key: String) -> Result<ServiceStatus, String> {
+    if license_key.is_empty() || license_key.len() > 4096 {
+        return Err("license key is missing or oversized".into());
+    }
+    send_request(Request::ActivateLicense { license_key })
+}
+
+#[tauri::command]
+fn import_offline_license(license: Vec<u8>) -> Result<ServiceStatus, String> {
+    if license.is_empty() || license.len() > 1_048_576 {
+        return Err("offline license is missing or oversized".into());
+    }
+    send_request(Request::ImportOfflineLicense { license })
+}
+
+#[tauri::command]
 fn authenticate_administrator(password: String, scope: String) -> Result<String, String> {
     if password.is_empty() || password.len() > 4096 {
         return Err("administrator password is missing or oversized".into());
     }
     if !matches!(
         scope.as_str(),
-        "stop" | "pause" | "repair" | "uninstall" | "deactivate"
+        "stop" | "pause" | "repair" | "uninstall" | "deactivate" | "support"
     ) {
         return Err("unsupported authorization scope".into());
     }
     send_request(Request::VerifyAdminPassword { password, scope })
+}
+
+#[tauri::command]
+fn install_or_repair_certificate(authorization: String) -> Result<ServiceStatus, String> {
+    send_request(Request::InstallOrRepairCertificate { authorization })
+}
+
+#[tauri::command]
+fn export_support_bundle(authorization: String) -> Result<SupportBundle, String> {
+    send_request(Request::ExportSupportBundle { authorization })
 }
 
 #[tauri::command]
@@ -179,8 +244,14 @@ pub fn run() {
             service_status,
             start_protection,
             refresh_policy,
+            create_administrator_password,
+            reset_administrator_password,
+            activate_license,
+            import_offline_license,
             authenticate_administrator,
             register_supervisor_service,
+            install_or_repair_certificate,
+            export_support_bundle,
             protected_operation
         ])
         .run(tauri::generate_context!())
@@ -200,7 +271,7 @@ mod tests {
     #[test]
     fn unavailable_status_is_explicit_not_optimistic() {
         let status = ServiceStatus::unavailable("not running");
-        assert_eq!(status.state, "serviceUnavailable");
+        assert_eq!(status.state, "supervisorUnreachable");
         assert_ne!(status.state, "running");
     }
 }

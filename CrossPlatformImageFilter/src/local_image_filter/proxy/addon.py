@@ -75,6 +75,21 @@ class LocalImageFilterAddon:
             f"providers={self.runtime.selected_providers}"
         )
 
+    def request(self, flow: http.HTTPFlow) -> None:
+        """Answer the supervisor's fixed health probe without contacting a remote host."""
+        if (
+            flow.request.pretty_host == "local-filter.invalid"
+            and flow.request.path == "/.well-known/local-image-filter/health"
+        ):
+            flow.response = http.Response.make(
+                204,
+                b"",
+                {
+                    "cache-control": "no-store",
+                    "x-local-image-filter-health": "ready",
+                },
+            )
+
     async def response(self, flow: http.HTTPFlow) -> None:
         if self.runtime is None or self.eligibility is None or self.semaphore is None:
             return

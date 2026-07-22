@@ -12,7 +12,7 @@ export type SupervisorState =
   | "stopping"
   | "recovering"
   | "error"
-  | "serviceUnavailable";
+  | "supervisorUnreachable";
 
 export interface ServiceStatus {
   state: SupervisorState;
@@ -29,6 +29,18 @@ export interface ServiceStatus {
 }
 
 export type ProtectedOperation = "stop" | "pause" | "repair" | "uninstall" | "deactivate";
+export type AuthorizationScope = ProtectedOperation | "support";
+
+export interface OnboardingResult {
+  status: ServiceStatus;
+  recoveryCode: string;
+}
+
+export interface SupportBundle {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
 
 export async function readStatus(): Promise<ServiceStatus> {
   return invoke<ServiceStatus>("service_status");
@@ -48,9 +60,17 @@ export async function protectedOperation(
 
 export async function authenticateAdministrator(
   password: string,
-  scope: ProtectedOperation,
+  scope: AuthorizationScope,
 ): Promise<string> {
   return invoke<string>("authenticate_administrator", { password, scope });
+}
+
+export async function installOrRepairCertificate(authorization: string): Promise<ServiceStatus> {
+  return invoke<ServiceStatus>("install_or_repair_certificate", { authorization });
+}
+
+export async function exportSupportBundle(authorization: string): Promise<SupportBundle> {
+  return invoke<SupportBundle>("export_support_bundle", { authorization });
 }
 
 export async function registerSupervisorService(): Promise<string> {
@@ -59,4 +79,28 @@ export async function registerSupervisorService(): Promise<string> {
 
 export async function refreshPolicy(): Promise<ServiceStatus> {
   return invoke<ServiceStatus>("refresh_policy");
+}
+
+export async function createAdministratorPassword(password: string): Promise<OnboardingResult> {
+  return invoke<OnboardingResult>("create_administrator_password", { password });
+}
+
+export async function resetAdministratorPassword(
+  newPassword: string,
+  recoveryCode?: string,
+  recoveryToken?: Uint8Array,
+): Promise<OnboardingResult> {
+  return invoke<OnboardingResult>("reset_administrator_password", {
+    newPassword,
+    recoveryCode: recoveryCode ?? null,
+    recoveryToken: recoveryToken ? Array.from(recoveryToken) : null,
+  });
+}
+
+export async function activateLicense(licenseKey: string): Promise<ServiceStatus> {
+  return invoke<ServiceStatus>("activate_license", { licenseKey });
+}
+
+export async function importOfflineLicense(license: Uint8Array): Promise<ServiceStatus> {
+  return invoke<ServiceStatus>("import_offline_license", { license: Array.from(license) });
 }

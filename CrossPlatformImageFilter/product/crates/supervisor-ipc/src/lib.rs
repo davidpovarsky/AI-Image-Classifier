@@ -24,6 +24,11 @@ pub enum Request {
     SetAdminPassword {
         password: String,
     },
+    ResetAdminPassword {
+        new_password: String,
+        recovery_code: Option<String>,
+        recovery_token: Option<Vec<u8>>,
+    },
     VerifyAdminPassword {
         password: String,
         scope: String,

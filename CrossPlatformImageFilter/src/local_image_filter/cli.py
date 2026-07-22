@@ -41,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--listen-host")
     run.add_argument("--listen-port", type=int)
     run.add_argument("--mode")
+    run.add_argument("--ca-directory")
     run.add_argument("mitm_args", nargs=argparse.REMAINDER)
 
     doctor = subparsers.add_parser("doctor", help="Validate configuration and runtime assets")
@@ -134,6 +135,11 @@ def _run(args: argparse.Namespace) -> int:
         "--mode",
         mode,
     ]
+    if args.ca_directory:
+        ca_directory = Path(args.ca_directory).expanduser().resolve()
+        if not ca_directory.is_dir():
+            raise ConfigurationError(f"CA directory does not exist: {ca_directory}")
+        command.extend(["--set", f"confdir={ca_directory}"])
     environment = dict(os.environ)
     if settings.source_path is not None:
         command.extend(["--set", f"local_image_filter_config={settings.source_path}"])

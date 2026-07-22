@@ -11,11 +11,17 @@ name = "supervisor"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 interprocess.workspace = true
 ctrlc.workspace = true
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+licensing = { path = "../../crates/licensing" }
+rand_core.workspace = true
+rcgen.workspace = true
 secure-storage = { path = "../../crates/secure-storage" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 supervisor-ipc = { path = "../../crates/supervisor-ipc" }
 time.workspace = true
 uuid.workspace = true

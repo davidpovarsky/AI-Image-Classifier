@@ -1,9 +1,14 @@
 import io
+from types import SimpleNamespace
 
 from PIL import Image
 
 from local_image_filter.image.rewrite import create_failure_placeholder
-from local_image_filter.proxy.addon import INVALIDATED_HEADERS, apply_replacement
+from local_image_filter.proxy.addon import (
+    INVALIDATED_HEADERS,
+    LocalImageFilterAddon,
+    apply_replacement,
+)
 from local_image_filter.proxy.filters import ResponseDisposition, ResponseEligibility
 
 
@@ -73,3 +78,16 @@ def test_replacement_headers_are_consistent() -> None:
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-local-image-filter"] == "replace"
     assert all(header not in response.headers for header in INVALIDATED_HEADERS)
+
+
+def test_supervisor_health_probe_is_answered_locally() -> None:
+    flow = SimpleNamespace(
+        request=SimpleNamespace(
+            pretty_host="local-filter.invalid",
+            path="/.well-known/local-image-filter/health",
+        ),
+        response=None,
+    )
+    LocalImageFilterAddon().request(flow)
+    assert flow.response.status_code == 204
+    assert flow.response.headers["x-local-image-filter-health"] == "ready"
