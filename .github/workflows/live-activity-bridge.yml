@@ -8,7 +8,6 @@ on:
       - "Commercial desktop CI"
       - "Regenerate NudeNet Core ML model"
     types:
-      - requested
       - in_progress
       - completed
 
