@@ -18,6 +18,7 @@ on:
       - feature/modular-image-safety-pipeline
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -32,14 +33,38 @@ jobs:
       OPEN_CLIP_COMMIT: 54c9754a94baacac5b2d9b1c76318078d48912af
 
     steps:
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Set up conversion Python
         uses: actions/setup-python@v6
         with:
@@ -47,6 +72,14 @@ jobs:
           cache: pip
           cache-dependency-path: tools/MobileCLIPConversion/requirements.txt
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Cache official checkpoint and verified Core ML conversion
         uses: actions/cache@v5
         with:
@@ -55,6 +88,14 @@ jobs:
             .model-cache/coreml-mobileclip2-s2
           key: mobileclip2-s2-fp16-ios17-${{ runner.os }}-${{ hashFiles('tools/MobileCLIPConversion/**') }}
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Install pinned conversion dependencies
         shell: bash
         run: |
@@ -71,10 +112,26 @@ jobs:
           python -m pip install -e "$RUNNER_TEMP/open_clip"
           echo "PYTHONPATH=$RUNNER_TEMP/ml-mobileclip:$RUNNER_TEMP/open_clip/src" >> "$GITHUB_ENV"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Download and checksum Apple's official MobileCLIP2-S2 checkpoint
         shell: bash
         run: tools/MobileCLIPConversion/download_model.sh "$CHECKPOINT_DIR"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Convert MobileCLIP2-S2 to Core ML
         shell: bash
         run: |
@@ -94,6 +151,14 @@ jobs:
               | tee build/build-diagnostics/conversion.log
           fi
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Inspect primary MIL program
         shell: bash
         run: |
@@ -103,6 +168,14 @@ jobs:
             --output build/build-diagnostics 2>&1 \
             | tee build/build-diagnostics/mil-inspection.log
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Verify Core ML against PyTorch
         shell: bash
         run: |
@@ -112,6 +185,14 @@ jobs:
             --models "$CONVERTED_DIR" \
             --output conversion-verification.json
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Build diagnostic conversion variants
         shell: bash
         run: |
@@ -185,6 +266,14 @@ jobs:
           }, indent=2) + "\n")
           PY
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Validate all build inputs early
         shell: bash
         run: |
@@ -215,6 +304,14 @@ jobs:
           assert "AI-Image-Classifier" in schemes, schemes
           PY
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Resolve Swift packages
         shell: bash
         run: |
@@ -225,6 +322,14 @@ jobs:
             -resolvePackageDependencies 2>&1 \
             | tee build/build-diagnostics/package-resolution.log
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Run unit tests
         shell: bash
         run: |
@@ -255,6 +360,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test 2>&1 | tee build/build-diagnostics/xcodebuild-tests.log
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Build for generic iOS device without signing
         shell: bash
         run: |
@@ -278,6 +391,14 @@ jobs:
             INFOPLIST_KEY_PyTorchVersion=2.8.0 \
             build 2>&1 | tee build/build-diagnostics/xcodebuild.log
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Archive for generic iOS device without signing
         shell: bash
         run: |
@@ -295,6 +416,14 @@ jobs:
             INFOPLIST_KEY_BuildDate="$(date -u +%FT%TZ)" INFOPLIST_KEY_CoreMLToolsVersion=9.0 INFOPLIST_KEY_PyTorchVersion=2.8.0 \
             archive 2>&1 | tee build/build-diagnostics/xcodebuild-archive.log
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Package and validate unsigned IPA
         shell: bash
         run: |
@@ -328,6 +457,15 @@ jobs:
           assert info.get("LSSupportsOpeningDocumentsInPlace") is True, info.get("LSSupportsOpeningDocumentsInPlace")
           PY
 
+      - name: Live Activity · refresh
+        if: always()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Record artifact sizes and build summary
         if: always()
         shell: bash
@@ -423,6 +561,15 @@ jobs:
           PY
           cat build/build-diagnostics/artifact-metadata.json
 
+      - name: Live Activity · refresh
+        if: always()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Upload unsigned IPA, model manifest, verification, and diagnostics
         if: always()
         uses: actions/upload-artifact@v7
