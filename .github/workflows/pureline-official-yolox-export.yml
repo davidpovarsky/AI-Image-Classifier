@@ -1,0 +1,98 @@
+name: Pureline - export decoded YOLOX Nano from pinned official checkpoint
+
+on:
+  push:
+    branches:
+      - codex/pureline-official-mobileclip2-s2-20261111
+    paths:
+      - .github/workflows/pureline-official-yolox-export.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-decoded-yolox-nano:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      YOLOX_COMMIT: 419778480ab6ec0590e5d3831b3afb3b46ab2aa3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned export dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.8.0 torchvision==0.23.0
+          python -m pip install \
+            numpy==2.0.2 Pillow==11.3.0 \
+            onnx==1.19.0 onnxruntime==1.27.0 \
+            loguru==0.7.3 opencv-python-headless==4.11.0.86 \
+            thop==0.1.1.post2209072238 tabulate==0.9.0
+          git clone --quiet https://github.com/Megvii-BaseDetection/YOLOX.git "$RUNNER_TEMP/YOLOX"
+          git -C "$RUNNER_TEMP/YOLOX" checkout --quiet --detach "$YOLOX_COMMIT"
+      - name: Download official pinned Nano checkpoint and export WITH decode
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .model-cache/yolox official-yolox-nano/reports
+          python CrossPlatformImageFilter/tools/model_download/acquire_yolox.py \
+            --output .model-cache/yolox/yolox_nano.pth
+          python CrossPlatformImageFilter/tools/model_export/export_yolox_onnx.py \
+            --yolox-root "$RUNNER_TEMP/YOLOX" \
+            --checkpoint .model-cache/yolox/yolox_nano.pth \
+            --input-size 416 \
+            --output official-yolox-nano/person_detector.onnx
+      - name: Verify decoded person boxes on a real image, no private data
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=CrossPlatformImageFilter/src python - <<'PY'
+          import hashlib,json,urllib.request
+          from pathlib import Path
+          import numpy as np,onnxruntime as ort
+          from PIL import Image
+          from local_image_filter.inference.yolox_decoder import YoloXDecoder
+          path=Path("official-yolox-nano/person_detector.onnx")
+          session=ort.InferenceSession(str(path),providers=['CPUExecutionProvider'])
+          assert session.get_inputs()[0].name=='images'
+          assert session.get_outputs()[0].name=='output'
+          class Session:
+              inputs=session.get_inputs()
+              outputs=session.get_outputs()
+              def run(self,feeds,outputs=None):return session.run(outputs,feeds)
+          detector=YoloXDecoder(Session(),input_size=416,class_count=80,confidence_threshold=0.30,iou_threshold=0.5)
+          url="https://raw.githubusercontent.com/opencv/opencv/31b0eeea0b44b370fd0712312df4214d4ae1b158/samples/data/basketball1.png"
+          data=urllib.request.urlopen(url,timeout=40).read()
+          assert hashlib.sha256(data).hexdigest()=="ba06f6701f7260998b430c39b6557f775497e6ce7b1a74f0b7ea6af371bf54a6"
+          import io
+          image=Image.open(io.BytesIO(data)).convert("RGB")
+          people=[x for x in detector.detect(image) if x.class_index==0]
+          print("Decoded-person-check: imageSize",image.size,"personCount",len(people),"areas",[round(x.width*x.height,4) for x in people[:10]])
+          assert len(people)>=1 and any(x.width*x.height >= 0.005 for x in people), "no plausible decoded persons"
+          report={
+              "checkpointSource":"https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_nano.pth",
+              "checkpointSHA256":"cd28f55fbbc1829f99d9ac9b38a16d259a22889739c8728ea877610201feff7b",
+              "sourceCommit":"419778480ab6ec0590e5d3831b3afb3b46ab2aa3",
+              "modelSHA256":hashlib.sha256(path.read_bytes()).hexdigest(),
+              "modelBytes":path.stat().st_size,
+              "decoding":"model.head.decode_in_inference=True; YOLOX stride grids 8,16,32 embedded in ONNX",
+              "safeFixturePeople":len(people),
+              "personBoxes": [{"x":x.x,"y":x.y,"w":x.width,"h":x.height,"confidence":x.confidence} for x in people],
+              "success":True
+          }
+          Path('official-yolox-nano/reports/decoder-verification.json').write_text(json.dumps(report,indent=2)+'\n')
+          PY
+      - name: Upload verified official decoded model (short retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pureline-Official-Decoded-YOLOX-Nano-ONNX
+          path: |
+            official-yolox-nano/person_detector.onnx
+            official-yolox-nano/reports/decoder-verification.json
+          retention-days: 3
+          if-no-files-found: error
